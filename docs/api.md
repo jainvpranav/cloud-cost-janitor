@@ -8,6 +8,32 @@ https://{api-gateway-id}.execute-api.{region}.amazonaws.com/{stage}
 ## Authentication
 Currently no authentication. Add API Key or Cognito for production.
 
+## CORS
+
+The UI is served from CloudFront and this API from API Gateway, so every browser
+call is cross-origin. All responses therefore carry:
+
+```
+Access-Control-Allow-Origin: https://<cloudfront-domain>
+Access-Control-Allow-Headers: Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token
+Access-Control-Allow-Methods: GET,POST,PUT,DELETE,OPTIONS
+Access-Control-Max-Age: 86400
+```
+
+`OPTIONS` is answered with `204` before any routing, and every resource in the
+CloudFormation template has an explicit `OPTIONS` method — API Gateway rejects
+preflight on a resource that has none, so adding a route means adding its `OPTIONS`
+method too.
+
+`Access-Control-Allow-Origin` comes from the `ALLOWED_ORIGIN` environment variable
+on the API Lambda, set by the template to the CloudFront domain. It defaults to `*`
+when the variable is absent, which is convenient locally and too permissive for
+production.
+
+Local development does not rely on any of this: `src/setupProxy.js` forwards API
+paths through the dev server, so the browser stays same-origin. See
+[development.md](development.md#2-configure-the-api-url-required).
+
 ## Endpoints
 
 ---
@@ -49,6 +75,27 @@ List findings with optional filters.
   "last_key": "eyJmaW5kaW5nX2lkIjogImYtZWMyL... (base64 encoded)"
 }
 ```
+
+---
+
+### GET /findings/{finding_id}
+
+Fetch a single finding.
+
+**Path Parameters**:
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `finding_id` | string | Finding identifier |
+
+**Response** (200): the finding object, same shape as an item from `GET /findings`.
+
+**Response** (404):
+```json
+{ "error": "Finding not found" }
+```
+
+> The approvals endpoint embeds the full finding on each approval record, so the
+> dashboard reads it from there rather than calling this per row.
 
 ---
 

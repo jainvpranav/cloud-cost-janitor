@@ -113,8 +113,35 @@ Cloud Cost Janitor is an automated AWS cost optimization platform that discovers
 
 ### 6. Frontend (React + CloudFront)
 **Hosting**: S3 static website + CloudFront CDN
-**Pages**: Dashboard, Approvals, Settings
+**Pages**: Dashboard, Insights, Findings, Approvals, Docs, Settings
 **Auth**: None (add Cognito for production)
+
+**Structure**:
+| Layer | Location | Responsibility |
+|-------|----------|----------------|
+| Shell | `App.js`, `components/Layout.jsx` | Routing, sidebar, topbar, error boundary |
+| Design system | `index.css`, `components/UI.jsx`, `components/Icons.jsx` | Tokens, primitives, inline SVG icons |
+| Charts | `components/Charts.jsx` | Inline SVG charts, no charting dependency |
+| Data | `lib/metrics.js`, `lib/insights.js`, `hooks/useApi.js` | KPI derivation, insight generation, fetching || API | `api/client.js` | axios instance, response guard, error messages |
+| Theme | `theme/ThemeProvider.jsx` | `light` / `dark` / `system`, persisted |
+
+**Design decisions worth knowing**:
+- **KPIs are derived client-side** from the findings and approvals the API already
+  returns. There is no separate aggregate endpoint, so the headline numbers cannot
+  disagree with the table underneath them.
+- **No chart or icon dependency.** Both are inline SVG, which keeps the bundle small
+  and avoids supply-chain surface for six chart types and ~60 icons.
+- **Theming is token-driven.** Light and dark are the same class names against
+  different custom properties, so a new component is themed by using tokens rather
+  than by writing dark-mode overrides.
+- **Approvals read the embedded finding** from the approval record instead of issuing
+  one request per row.
+- **Findings and approvals use different status vocabularies** — `STATUS` and
+  `APPROVAL_STATUS` in `lib/metrics.js` are deliberately separate constants.
+
+**Local development** uses `src/setupProxy.js` to forward API paths through the dev
+server, keeping the browser same-origin. Production calls API Gateway directly and
+depends on the CORS headers described in [api.md](api.md#cors).
 
 ## Data Models
 
