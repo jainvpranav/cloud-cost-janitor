@@ -46,10 +46,11 @@ def evaluate_ec2(instance: Dict, metrics: Dict, asg_instance_ids: set, config: S
     network_in = metrics.get("network_in_bytes", 0)
 
     if cpu_avg < config.cpu_threshold_percent and network_in < config.network_idle_bytes:
+        region = instance["Placement"]["AvailabilityZone"][:-1]
         return {
             "resource_type": "EC2",
             "resource_id": instance_id,
-            "region": instance["Placement"]["AvailabilityZone"][:-1],
+            "region": region,
             "evidence": {
                 "cpu_avg_24h": round(cpu_avg, 2),
                 "cpu_max_24h": round(metrics.get("cpu_max", 0), 2),
@@ -59,7 +60,7 @@ def evaluate_ec2(instance: Dict, metrics: Dict, asg_instance_ids: set, config: S
                 "launch_time": instance["LaunchTime"].isoformat() if isinstance(instance.get("LaunchTime"), datetime) else instance.get("LaunchTime"),
             },
             "tags": tags,
-            "monthly_cost_usd": 0,
+            "monthly_cost_usd": estimate_ec2_cost(instance["InstanceType"], region),
         }
     return None
 
@@ -139,7 +140,7 @@ def evaluate_lb(lb: Dict, target_groups: List[Dict], target_health_map: Dict, me
     if has_healthy_targets:
         return None
 
-    request_count = metrics.get("request_count", 0)
+    request_count = metrics.get("request_count_7d", metrics.get("request_count", 0))
     if request_count > 0:
         return None
 
