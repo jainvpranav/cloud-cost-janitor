@@ -25,9 +25,13 @@ EventBridge (daily 6 AM UTC)
 - **Teardown**: Guarded resource deletion with dual-approval
 
 ### Frontend (React + CloudFront)
-- Dashboard: All findings with filtering
-- Approvals: Review queue with voting
-- Settings: Configure thresholds, tags, notifications
+- **Dashboard**: KPI strip, generated insights, findings explorer with card/table views
+- **Insights**: Cost breakdowns, approval funnel, confidence and risk distribution, ageing
+- **Findings**: Sortable, filterable table over every finding with CSV export
+- **Approvals**: Review queue with voting, dual-approval and dry-run teardown
+- **Docs**: In-app "How it works" reference
+- **Settings**: Thresholds, guardrails and notification config
+- Light/dark/system theming, inline SVG charts and icons (no charting dependency)
 
 ### Infrastructure (CloudFormation)
 - DynamoDB tables (Findings, Approvals, Config, Prompts)
@@ -104,14 +108,25 @@ Uses AWS Pricing API with fallback to hardcoded on-demand rates (us-east-1, Linu
 
 ## Development
 
+The frontend needs the API base URL before it will show any data.
+
 ```bash
-# Frontend
 cd frontend
 npm install
-npm start
+
+cp .env.example .env      # Windows: copy .env.example .env
+# edit .env and set REACT_APP_API_URL to the ApiUrl stack output
+
+npm start                 # proxies API paths, so no CORS setup needed locally
+npm test -- --watchAll=false
+npm run build
 
 # Backend - deploy via CloudFormation or SAM
 ```
+
+Without `REACT_APP_API_URL` every request goes to the dev server instead of the
+API and fails with `Cannot GET /findings`. See
+[docs/development.md](docs/development.md) for details.
 
 ## Project Structure
 
@@ -125,6 +140,15 @@ cloud-cost-janitor/
 │   ├── approval/              # REST API
 │   └── teardown/              # Guarded deletion
 ├── frontend/                  # React dashboard
+│   └── src/
+│       ├── App.js             # Shell and routes
+│       ├── api/               # axios client
+│       ├── theme/             # Light/dark/system
+│       ├── lib/               # Formatting, KPIs, insights
+│       ├── hooks/             # Data fetching
+│       ├── components/        # Design system, charts, layout
+│       └── pages/             # One file per route
+├── docs/                      # Architecture, API, deployment, ops, security
 └── .github/workflows/         # CI/CD pipelines
 ```
 
