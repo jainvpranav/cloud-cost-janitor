@@ -122,56 +122,146 @@ cd frontend
 npm install
 ```
 
-#### 2. Start Development Server
+#### 2. Configure the API URL (required)
+
+The frontend needs to know where the API lives. Without this, requests go to the
+dev server itself and every call fails with `Cannot GET /findings`.
+
 ```bash
-# Set API URL for local development
-export REACT_APP_API_URL=http://localhost:3001
+cp .env.example .env      # Windows: copy .env.example .env
+```
+
+Then edit `frontend/.env`:
+
+```
+REACT_APP_API_URL=https://{api-id}.execute-api.{region}.amazonaws.com/{stage}
+```
+
+The value comes from the `ApiUrl` stack output. No trailing slash. Keep the stage
+suffix unless your stage is `prod`.
+
+> Create React App only exposes variables prefixed with `REACT_APP_`, and it reads
+> `.env` at startup, so restart `npm start` after any change.
+
+#### 3. Start the Development Server
+```bash
 npm start
 ```
 
-#### 3. Mock API for Development
-```bash
-# Create mock server
-cat > frontend/src/mockApi.js << 'EOF'
-export const mockFindings = [
-  {
-    finding_id: "f-ec2-i-12345-20240115",
-    resource_type: "EC2",
-    resource_id: "i-12345",
-    region: "us-east-1",
-    monthly_cost_usd: 45.67,
-    status: "PENDING_APPROVAL",
-    detected_at: "2024-01-15T06:00:00Z",
-    evidence: { cpu_avg_24h: 2.1, instance_type: "t3.medium" },
-    tags: { Environment: "dev", Team: "platform" },
-    enrichment: {
-      risk_assessment: "low",
-      recommendation: "delete",
-      confidence: 0.92,
-      reasoning: "Dev instance with <5% CPU for 24h",
-      suggested_action: "terminate instance"
-    }
-  }
-];
+In development the browser calls **relative** paths and `src/setupProxy.js` forwards
+`/findings`, `/approvals`, `/teardown` and `/config` to `REACT_APP_API_URL`. The
+browser therefore only ever talks to `localhost:3000`, so there is no CORS preflight
+locally and you do not need the API to allow your origin. Startup prints the target:
 
-export const mockApprovals = [
-  {
-    approval_id: "appr-f-ec2-i-12345-20240115",
-    finding_id: "f-ec2-i-12345-20240115",
-    status: "PENDING",
-    required_approvals: 1,
-    votes: [],
-    created_at: "2024-01-15T06:05:00Z",
-    expires_at: "2024-01-22T06:05:00Z"
-  }
-];
-EOF
 ```
+[setupProxy] proxying /findings, /approvals, /teardown, /config -> https://...
+```
+
+If you see `[setupProxy] REACT_APP_API_URL is not set` instead, step 2 was skipped.
+
+Production builds have no dev server, so they call `REACT_APP_API_URL` directly from
+the browser. That is why the API sends CORS headers — see [api.md](api.md#cors).
 
 #### 4. Run Tests
 ```bash
 npm test -- --watchAll=false
 ```
+
+Two suites ship with the frontend:
+
+| Suite | What it covers |
+|-------|----------------|
+| `src/App.smoke.test.jsx` | Every route renders, and `computeMetrics` returns sane KPIs for empty and populated data |
+| `src/api/client.test.js` | Response handling, the HTML-body misconfiguration, and `toMessage` |
+
+The smoke tests assert the `ErrorBoundary` did **not** fire. This matters: the app
+shell catches render errors, so a test that only checks "something rendered" passes
+even when the page underneath is a crash.
+
+#### 5. Mocking the API
+
+There is no mock server in the repo. To work without a deployed backend, mock the
+client module in the test you are writing:
+
+```js
+jest.mock('./api/client', () => {
+  const list = async () => ({ data: { items: [], last_key: null } });
+  return {
+    toMessage: (e) => (e && e.message) || 'error',
+    findingsApi: { list, get: list },
+    approvalsApi: { list, vote: list, teardown: list },
+    configApi: { get: list, update: list },
+  };
+});
+```
+
+A representative finding record looks like this, and is what the KPI layer expects:
+
+```js
+{
+  finding_id: "f-ec2-i-12345-20240115",
+  resource_type: "EC2",
+  resource_id: "i-12345",
+  region: "us-east-1",
+  account_id: "123456789012",
+  monthly_cost_usd: 45.67,
+  status: "PENDING_APPROVAL",
+  detected_at: "2024-01-15T06:00:00Z",
+  evidence: { cpu_avg_24h: 2.1, instance_type: "t3.medium" },
+  tags: { Environment: "dev", Team: "platform" },
+  enrichment: {
+    risk_assessment: "low",
+    recommendation: "delete",
+    confidence: 0.92,
+    reasoning: "Dev instance with <5% CPU for 24h",
+    suggested_action: "terminate instance"
+  }
+}
+```
+
+> **Status vocabularies differ.** Findings use
+> `PENDING_ENRICHMENT | PENDING_APPROVAL | APPROVED | REJECTED | TEARDOWN_COMPLETE`.
+> Approvals use `PENDING | APPROVED | REJECTED`. They are separate constants —
+> `STATUS` and `APPROVAL_STATUS` in `src/lib/metrics.js` — because conflating them
+> silently mis-counts every approval KPI.
+
+#### 6. Build
+```bash
+npm run build
+```
+
+---
+
+## Frontend Structure
+
+```
+frontend/src/
+├── index.js                  # Mounts ThemeProvider above the router
+├── App.js                    # Shell, routes, pending-approval count
+├── setupProxy.js             # Dev-only API proxy (CRA reads this automatically)
+├── api/client.js             # axios instance, response guard, toMessage
+├── theme/ThemeProvider.jsx   # light | dark | system, persisted to localStorage
+├── lib/
+│   ├── format.js             # money, counts, percentages, dates
+│   ├── metrics.js            # every KPI, derived from findings + approvals
+│   └── insights.js           # severity-tagged observations
+├── hooks/useApi.js           # useFindings, useApprovals, useAsync
+├── components/
+│   ├── UI.jsx                # design-system primitives
+│   ├── Icons.jsx             # inline SVG icon set
+│   ├── Charts.jsx            # inline SVG charts
+│   ├── Layout.jsx            # Sidebar, Topbar, ErrorBoundary
+│   ├── FindingCard.jsx       # finding and approval UI
+│   └── Docs.jsx              # documentation rendering
+└── pages/                    # Dashboard, Insights, Findings, Approvals,
+                              # Docs, Settings, NotFound
+```
+
+KPIs are computed client-side from the records the API already returns, so the
+numbers on screen always agree with the rows beneath them. There is deliberately no
+second aggregate endpoint that could disagree.
+
+Routes: `/`, `/insights`, `/approvals`, `/findings`, `/docs`, `/settings`.
 
 ---
 
