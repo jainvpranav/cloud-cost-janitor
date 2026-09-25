@@ -1,0 +1,309 @@
+# API Reference
+
+## Base URL
+```
+https://{api-gateway-id}.execute-api.{region}.amazonaws.com/{stage}
+```
+
+## Authentication
+Currently no authentication. Add API Key or Cognito for production.
+
+## Endpoints
+
+---
+
+### GET /findings
+
+List findings with optional filters.
+
+**Query Parameters**:
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `status` | string | Filter by status: `PENDING_ENRICHMENT`, `PENDING_APPROVAL`, `APPROVED`, `REJECTED`, `TEARDOWN_COMPLETE` |
+| `account_id` | string | Filter by account |
+| `limit` | integer | Max results (default: 50, max: 100) |
+| `last_key` | string | Pagination token (JSON) |
+
+**Response** (200):
+```json
+{
+  "items": [
+    {
+      "finding_id": "f-ec2-i-12345-20240115",
+      "account_id": "123456789012",
+      "resource_type": "EC2",
+      "resource_id": "i-12345",
+      "region": "us-east-1",
+      "monthly_cost_usd": 45.67,
+      "status": "PENDING_APPROVAL",
+      "detected_at": "2024-01-15T06:00:00Z",
+      "evidence": { "cpu_avg_24h": 2.1 },
+      "tags": { "Environment": "staging" },
+      "enrichment": {
+        "risk_assessment": "low",
+        "recommendation": "delete",
+        "confidence": 0.92
+      }
+    }
+  ],
+  "last_key": "eyJmaW5kaW5nX2lkIjogImYtZWMyL... (base64 encoded)"
+}
+```
+
+---
+
+### GET /approvals
+
+List approval requests.
+
+**Query Parameters**:
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `status` | string | Filter by status (default: `PENDING`) |
+| `limit` | integer | Max results (default: 50) |
+| `last_key` | string | Pagination token |
+
+**Response** (200):
+```json
+{
+  "items": [
+    {
+      "approval_id": "appr-f-ec2-i-12345-20240115",
+      "finding_id": "f-ec2-i-12345-20240115",
+      "status": "PENDING",
+      "required_approvals": 2,
+      "votes": [
+        { "user": "alice@company.com", "decision": "approve", "at": "2024-01-15T10:00:00Z" }
+      ],
+      "created_at": "2024-01-15T06:05:00Z",
+      "expires_at": "2024-01-22T06:05:00Z",
+      "finding": { ... }
+    }
+  ],
+  "last_key": "..."
+}
+```
+
+---
+
+### POST /approvals/{approval_id}/vote
+
+Submit a vote on an approval request.
+
+**Path Parameters**:
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `approval_id` | string | Approval ID from GET /approvals |
+
+**Request Body**:
+```json
+{
+  "decision": "approve|reject",
+  "user": "user@company.com"
+}
+```
+
+**Response** (200):
+```json
+{
+  "approval_id": "appr-f-ec2-i-12345-20240115",
+  "status": "APPROVED",
+  "required_approvals": 2,
+  "votes": [
+    { "user": "alice@company.com", "decision": "approve", "at": "2024-01-15T10:00:00Z" },
+    { "user": "bob@company.com", "decision": "approve", "at": "2024-01-15T11:00:00Z" }
+  ]
+}
+```
+
+**Error Responses**:
+- 400: Invalid decision, user already voted, approval not pending
+- 404: Approval not found
+
+---
+
+### POST /teardown
+
+Trigger teardown for an approved finding.
+
+**Request Body**:
+```json
+{
+  "approval_id": "appr-f-ec2-i-12345-20240115",
+  "dry_run": true
+}
+```
+
+**Response** (202 - Async):
+```json
+{
+  "message": "Teardown triggered",
+  "dry_run": true
+}
+```
+
+**Teardown Lambda Response** (via CloudWatch Logs):
+```json
+{
+  "success": true,
+  "action": "Terminated EC2 instance i-12345",
+  "resource_id": "i-12345",
+  "dry_run": false
+}
+```
+
+---
+
+### GET /config
+
+Get current configuration.
+
+**Response** (200):
+```json
+{
+  "role_arn": "arn:aws:iam::123456789012:role/CostJanitorScanner",
+  "account_id": "123456789012",
+  "cpu_threshold_percent": 5.0,
+  "cpu_hours": 24,
+  "network_idle_bytes": 1048576,
+  "ebs_unattached_days": 7,
+  "ebs_no_snapshot_days": 30,
+  "lb_idle_days": 7,
+  "excluded_tags": {
+    "Environment": ["prod", "production"],
+    "CostJanitor": ["ignore", "do-not-delete"]
+  },
+  "notification_emails": ["admin@company.com"]
+}
+```
+
+---
+
+### PUT /config
+
+Update configuration.
+
+**Request Body** (all fields optional):
+```json
+{
+  "role_arn": "arn:aws:iam::123456789012:role/CostJanitorScanner",
+  "account_id": "123456789012",
+  "cpu_threshold_percent": 3.0,
+  "cpu_hours": 48,
+  "network_idle_bytes": 524288,
+  "ebs_unattached_days": 14,
+  "ebs_no_snapshot_days": 60,
+  "lb_idle_days": 14,
+  "excluded_tags": {
+    "Environment": ["prod", "production", "staging"],
+    "CostJanitor": ["ignore", "do-not-delete", "keep"]
+  },
+  "notification_emails": ["admin@company.com", "finops@company.com"]
+}
+```
+
+**Response** (200):
+```json
+{
+  "message": "Config updated"
+}
+```
+
+---
+
+## Error Format
+
+All errors follow this structure:
+```json
+{
+  "error": "Error message",
+  "code": "ERROR_CODE"
+}
+```
+
+**Common HTTP Status Codes**:
+| Code | Description |
+|------|-------------|
+| 200 | Success |
+| 202 | Accepted (async operation) |
+| 400 | Bad Request |
+| 404 | Not Found |
+| 403 | Guardrail violation / Forbidden |
+| 500 | Internal Server Error |
+
+---
+
+## Finding Status Flow
+
+```
+PENDING_ENRICHMENT → PENDING_APPROVAL → APPROVED → TEARDOWN_COMPLETE
+                        ↓
+                      REJECTED
+                        ↓
+                      EXPIRED (after 7 days)
+```
+
+---
+
+## Guardrail Rules (Enforced in Teardown)
+
+| Rule | Threshold | Action |
+|------|-----------|--------|
+| Production tag | `Environment=prod\|production` | Block |
+| CostJanitor tag | `CostJanitor=protect\|do-not-delete\|keep` | Block |
+| Auto-approve | Cost ≤ $100/mo | 1 approval |
+| Dual approval | Cost > $100/mo | 2 approvals |
+| Max cost | Cost > $1000/mo | Block entirely |
+| Dry-run default | All teardowns | Simulate first |
+| EBS snapshot | Before delete | Required |
+| Max resources | Per invocation | 10 |
+
+---
+
+## Example Workflows
+
+### 1. Full Approval Flow
+```bash
+# 1. List pending approvals
+curl https://api.example.com/prod/approvals
+
+# 2. Vote approve
+curl -X POST https://api.example.com/prod/approvals/appr-abc/vote \
+  -H "Content-Type: application/json" \
+  -d '{"decision": "approve", "user": "alice@company.com"}'
+
+# 3. Second approver votes
+curl -X POST https://api.example.com/prod/approvals/appr-abc/vote \
+  -H "Content-Type: application/json" \
+  -d '{"decision": "approve", "user": "bob@company.com"}'
+
+# 4. Trigger teardown (dry-run first)
+curl -X POST https://api.example.com/prod/teardown \
+  -H "Content-Type: application/json" \
+  -d '{"approval_id": "appr-abc", "dry_run": true}'
+
+# 5. Execute real teardown
+curl -X POST https://api.example.com/prod/teardown \
+  -H "Content-Type: application/json" \
+  -d '{"approval_id": "appr-abc", "dry_run": false}'
+```
+
+### 2. Update Scan Thresholds
+```bash
+curl -X PUT https://api.example.com/prod/config \
+  -H "Content-Type: application/json" \
+  -d '{
+    "cpu_threshold_percent": 3.0,
+    "ebs_unattached_days": 14,
+    "notification_emails": ["admin@company.com", "finops@company.com"]
+  }'
+```
+
+### 3. Pagination
+```bash
+# First page
+curl "https://api.example.com/prod/findings?limit=20&status=PENDING_APPROVAL"
+
+# Subsequent pages (use last_key from previous response)
+curl "https://api.example.com/prod/findings?limit=20&status=PENDING_APPROVAL&last_key=eyJmaW5kaW5nX2lkIj..."
+```
