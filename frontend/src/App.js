@@ -1,52 +1,81 @@
-import React, { useState } from 'react';
-import { Routes, Route, Link, useLocation } from 'react-router-dom';
+import React, { useEffect, useState } from 'react';
+import { Route, Routes, useLocation } from 'react-router-dom';
+
+import { AppFooter, ErrorBoundary, Sidebar, Topbar, useDrawer } from './components/Layout';
 import { Dashboard } from './pages/Dashboard';
+import { Findings } from './pages/Findings';
 import { Approvals } from './pages/Approvals';
+import { Insights } from './pages/Insights';
+import { Docs } from './pages/Docs';
 import { Settings } from './pages/Settings';
-import { NavLink } from './components/UI';
+import { NotFound } from './pages/NotFound';
+import { useApprovals } from './hooks/useApi';
 
-const navItems = [
-  { path: '/', label: 'Dashboard' },
-  { path: '/approvals', label: 'Approvals' },
-  { path: '/settings', label: 'Settings' },
-];
-
-export default function App() {
+function Shell() {
   const location = useLocation();
+  const [drawerOpen, setDrawerOpen] = useDrawer();
+  const [rail, setRail] = useState(false);
+
+  // The approval count drives the sidebar badge and topbar bell, so it is
+  // fetched once at the shell level and shared by every page.
+  const { approvals } = useApprovals({ status: 'PENDING', limit: 200 });
+  const pendingCount = approvals.filter((a) => a.status === 'PENDING').length;
+
+  // Lightweight pending count for the sidebar's "Insights" badge.
+  const openHint = pendingCount;
+
+  useEffect(() => {
+    setDrawerOpen(false);
+    window.scrollTo({ top: 0, behavior: 'auto' });
+  }, [location.pathname, setDrawerOpen]);
+
+  useEffect(() => {
+    const onKey = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'b') {
+        e.preventDefault();
+        setRail((r) => !r);
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, []);
 
   return (
-    <div style={{ minHeight: '100vh' }}>
-      <header style={{ background: 'var(--card-bg)', borderBottom: '1px solid var(--border)', position: 'sticky', top: 0, zIndex: 100 }}>
-        <div className="container" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '16px 24px' }}>
-          <Link to="/" style={{ fontSize: '20px', fontWeight: 700, color: 'var(--primary)', textDecoration: 'none' }}>
-            ☁️ Cloud Cost Janitor
-          </Link>
-          <nav className="nav">
-            {navItems.map((item) => (
-              <NavLink
-                key={item.path}
-                to={item.path}
-                active={location.pathname === item.path || (item.path !== '/' && location.pathname.startsWith(item.path))}
-              >
-                {item.label}
-              </NavLink>
-            ))}
-          </nav>
-        </div>
-      </header>
+    <div className={`app ${rail ? 'rail' : ''} ${drawerOpen ? 'drawer-open' : ''}`}>
+      <Sidebar
+        pendingApprovals={pendingCount}
+        openCount={openHint}
+        rail={rail}
+        onNavigate={() => setDrawerOpen(false)}
+      />
+      {drawerOpen ? <div className="sidebar-scrim" onClick={() => setDrawerOpen(false)} aria-hidden="true" /> : null}
 
-      <main>
-        <Routes>
-          <Route path="/" element={<Dashboard />} />
-          <Route path="/approvals" element={<Approvals />} />
-          <Route path="/approvals/*" element={<Approvals />} />
-          <Route path="/settings" element={<Settings />} />
-        </Routes>
-      </main>
-
-      <footer style={{ padding: '24px', textAlign: 'center', color: 'var(--text-muted)', fontSize: '13px', borderTop: '1px solid var(--border)', marginTop: '40px' }}>
-        Cloud Cost Janitor v1.0.0 • Built with React & AWS
-      </footer>
+      <div className="app-main">
+        <Topbar
+          onMenu={() => setDrawerOpen(true)}
+          pendingApprovals={pendingCount}
+          onNavigate={() => setDrawerOpen(false)}
+        />
+        <main className="grow">
+          <ErrorBoundary key={location.pathname}>
+            <Routes>
+              <Route path="/" element={<Dashboard />} />
+              <Route path="/insights" element={<Insights />} />
+              <Route path="/approvals" element={<Approvals />} />
+              <Route path="/approvals/*" element={<Approvals />} />
+              <Route path="/findings" element={<Findings />} />
+              <Route path="/docs" element={<Docs />} />
+              <Route path="/settings" element={<Settings />} />
+              <Route path="*" element={<NotFound />} />
+            </Routes>
+          </ErrorBoundary>
+        </main>
+        <AppFooter />
+      </div>
     </div>
   );
+}
+
+export default function App() {
+  return <Shell />;
 }
