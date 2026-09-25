@@ -10,7 +10,9 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
+# Anchored to the repo root on purpose: an unanchored `lib/` also matched
+# frontend/src/lib/, which is JavaScript source, and silently dropped it.
+/lib/
 lib64/
 parts/
 sdist/
