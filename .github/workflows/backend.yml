@@ -1,0 +1,98 @@
+name: Backend Deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - 'infrastructure/**'
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  STACK_NAME: cost-janitor-prod
+  ENVIRONMENT: prod
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy Backend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Package Scanner Lambda
+        run: |
+          cd backend/scanner
+          pip install -r requirements.txt -t package/
+          cp lambda_function.py aws_client.py rules.py package/
+          cd package && zip -r ../../scanner.zip .
+
+      - name: Package Enrichment Lambda
+        run: |
+          cd backend/enrichment
+          pip install -r requirements.txt -t package/
+          cp lambda_function.py prompts.py package/
+          cd package && zip -r ../../enrichment.zip .
+
+      - name: Package Teardown Lambda
+        run: |
+          cd backend/teardown
+          pip install -r requirements.txt -t package/
+          cp lambda_function.py package/
+          cd package && zip -r ../../teardown.zip .
+
+      - name: Package Approval API Lambda
+        run: |
+          cd backend/approval
+          pip install -r requirements.txt -t package/ 2>/dev/null || true
+          cp api.py package/
+          cd package && zip -r ../../api.zip .
+
+      - name: Upload Lambda Artifacts
+        run: |
+          aws s3 cp scanner.zip s3://${{ secrets.ARTIFACTS_BUCKET }}/cost-janitor/scanner-${{ github.sha }}.zip
+          aws s3 cp enrichment.zip s3://${{ secrets.ARTIFACTS_BUCKET }}/cost-janitor/enrichment-${{ github.sha }}.zip
+          aws s3 cp teardown.zip s3://${{ secrets.ARTIFACTS_BUCKET }}/cost-janitor/teardown-${{ github.sha }}.zip
+          aws s3 cp api.zip s3://${{ secrets.ARTIFACTS_BUCKET }}/cost-janitor/api-${{ github.sha }}.zip
+
+      - name: Deploy CloudFormation Stack
+        uses: aws-actions/aws-cloudformation-github-deploy@v1
+        with:
+          name: ${{ env.STACK_NAME }}
+          template: infrastructure/template.yaml
+          parameter-overrides: >
+            Environment=${{ env.ENVIRONMENT }}
+            OpenAIApiKey=${{ secrets.OPENAI_API_KEY }}
+            NotificationEmail=${{ secrets.NOTIFICATION_EMAIL }}
+            FrontendBucketName=${{ secrets.FRONTEND_BUCKET }}
+          capabilities: CAPABILITY_NAMED_IAM
+          no-fail-on-empty-changeset: '1'
+
+      - name: Update Lambda Code
+        run: |
+          aws lambda update-function-code --function-name cost-janitor-scanner-${{ env.ENVIRONMENT }} --s3-bucket ${{ secrets.ARTIFACTS_BUCKET }} --s3-key cost-janitor/scanner-${{ github.sha }}.zip
+          aws lambda update-function-code --function-name cost-janitor-enrichment-${{ env.ENVIRONMENT }} --s3-bucket ${{ secrets.ARTIFACTS_BUCKET }} --s3-key cost-janitor/enrichment-${{ github.sha }}.zip
+          aws lambda update-function-code --function-name cost-janitor-teardown-${{ env.ENVIRONMENT }} --s3-bucket ${{ secrets.ARTIFACTS_BUCKET }} --s3-key cost-janitor/teardown-${{ github.sha }}.zip
+          aws lambda update-function-code --function-name cost-janitor-api-${{ env.ENVIRONMENT }} --s3-bucket ${{ secrets.ARTIFACTS_BUCKET }} --s3-key cost-janitor/api-${{ github.sha }}.zip
+
+      - name: Seed Prompt Registry
+        run: |
+          aws dynamodb put-item \
+            --table-name cost-janitor-prompts-${{ env.ENVIRONMENT }} \
+            --item '{"model_name": {"S": "cost-janitor-enrichment"}, "version": {"S": "v1"}, "template": {"S": "You are a Cloud Cost Optimization Expert. Analyze the following AWS resource finding and provide enrichment.\n\nRESOURCE DETAILS:\n- Type: {{resource_type}}\n- ID: {{resource_id}}\n- Region: {{region}}\n- Monthly Cost: ${{monthly_cost_usd}}\n- Evidence: {{evidence}}\n- Tags: {{tags}}\n\nTASK: Provide a JSON response with:\n1. risk_assessment: \"low\" | \"medium\" | \"high\" - Risk of deleting this resource\n2. business_impact: Brief description of what happens if deleted\n3. recommendation: \"delete\" | \"downsize\" | \"keep\" | \"investigate\"\n4. confidence: 0.0 to 1.0 - Confidence in recommendation\n5. reasoning: Detailed explanation\n6. suggested_action: Specific action to take (e.g., \"terminate instance\", \"delete volume after snapshot\", \"delete load balancer\")\n\nConsider:\n- Production tags (Environment=prod) \u2192 always recommend \"keep\" with high confidence\n- Development/staging with low utilization \u2192 \"delete\" with high confidence\n- Resources with recent activity \u2192 \"investigate\"\n- Cost vs. risk tradeoff\n\nOutput ONLY valid JSON."}}'

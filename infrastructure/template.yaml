@@ -1,0 +1,625 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Cloud Cost Janitor - AWS Resource Scanner & Teardown System'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: prod
+    AllowedValues: [dev, staging, prod]
+  OpenAIApiKey:
+    Type: String
+    NoEcho: true
+    Description: OpenAI API key for enrichment
+  FrontendBucketName:
+    Type: String
+    Default: cost-janitor-frontend
+  NotificationEmail:
+    Type: String
+    Default: admin@company.com
+    Description: Email for approval notifications
+
+Resources:
+  # ============================================================
+  # DYNAMODB TABLES
+  # ============================================================
+  FindingsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub cost-janitor-findings-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: finding_id
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+        - AttributeName: account_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: finding_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: status-index
+          KeySchema:
+            - AttributeName: status
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: account-index
+          KeySchema:
+            - AttributeName: account_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  ApprovalsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub cost-janitor-approvals-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: approval_id
+          AttributeType: S
+        - AttributeName: finding_id
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+      KeySchema:
+        - AttributeName: approval_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: finding-index
+          KeySchema:
+            - AttributeName: finding_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: status-index
+          KeySchema:
+            - AttributeName: status
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  ConfigTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub cost-janitor-config-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: config_key
+          AttributeType: S
+      KeySchema:
+        - AttributeName: config_key
+          KeyType: HASH
+
+  PromptRegistryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub cost-janitor-prompts-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: model_name
+          AttributeType: S
+        - AttributeName: version
+          AttributeType: S
+      KeySchema:
+        - AttributeName: model_name
+          KeyType: HASH
+        - AttributeName: version
+          KeyType: RANGE
+
+  # ============================================================
+  # SNS TOPIC FOR NOTIFICATIONS
+  # ============================================================
+  ApprovalNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub cost-janitor-approvals-${Environment}
+      DisplayName: Cost Janitor Approval Notifications
+
+  ApprovalNotificationSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref ApprovalNotificationTopic
+      Protocol: email
+      Endpoint: !Ref NotificationEmail
+
+  # ============================================================
+  # IAM ROLES
+  # ============================================================
+  ScannerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub cost-janitor-scanner-${Environment}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ScannerPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:DescribeInstanceStatus
+                  - ec2:DescribeVolumes
+                  - ec2:DescribeSnapshots
+                  - elasticloadbalancing:DescribeLoadBalancers
+                  - elasticloadbalancing:DescribeTargetGroups
+                  - elasticloadbalancing:DescribeTargetHealth
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:ListMetrics
+                  - autoscaling:DescribeAutoScalingGroups
+                  - pricing:GetProducts
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !GetAtt FindingsTable.Arn
+                  - !GetAtt ConfigTable.Arn
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref ApprovalNotificationTopic
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !GetAtt EnrichmentFunction.Arn
+              - Effect: Allow
+                Action:
+                  - sts:AssumeRole
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    sts:ExternalId: !Sub cost-janitor-${Environment}
+
+  EnrichmentRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub cost-janitor-enrichment-${Environment}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: EnrichmentPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:PutItem
+                  - dynamodb:Query
+                Resource:
+                  - !GetAtt FindingsTable.Arn
+                  - !GetAtt ApprovalsTable.Arn
+                  - !GetAtt PromptRegistryTable.Arn
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref ApprovalNotificationTopic
+
+  TeardownRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub cost-janitor-teardown-${Environment}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: TeardownPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:TerminateInstances
+                  - ec2:StopInstances
+                  - ec2:DeleteVolume
+                  - ec2:CreateSnapshot
+                  - elasticloadbalancing:DeleteLoadBalancer
+                  - elasticloadbalancingv2:DeleteLoadBalancer
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Query
+                Resource:
+                  - !GetAtt FindingsTable.Arn
+                  - !GetAtt ApprovalsTable.Arn
+              - Effect: Allow
+                Action:
+                  - sts:AssumeRole
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    sts:ExternalId: !Sub cost-janitor-${Environment}
+
+  ApiRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub cost-janitor-api-${Environment}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ApiPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !GetAtt FindingsTable.Arn
+                  - !GetAtt ApprovalsTable.Arn
+                  - !GetAtt ConfigTable.Arn
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !GetAtt TeardownFunction.Arn
+
+  # ============================================================
+  # LAMBDA FUNCTIONS
+  # ============================================================
+  ScannerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub cost-janitor-scanner-${Environment}
+      Runtime: python3.11
+      Handler: lambda_function.handler
+      Role: !GetAtt ScannerRole.Arn
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          FINDINGS_TABLE: !Ref FindingsTable
+          CONFIG_TABLE: !Ref ConfigTable
+          ENRICHMENT_FUNCTION: !Ref EnrichmentFunction
+          APPROVAL_TOPIC_ARN: !Ref ApprovalNotificationTopic
+          ENVIRONMENT: !Ref Environment
+      Code:
+        ZipFile: |
+          # Placeholder - replaced by CI/CD
+          def handler(event, context):
+              return {"statusCode": 200, "body": "Scanner not deployed yet"}
+
+  EnrichmentFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub cost-janitor-enrichment-${Environment}
+      Runtime: python3.11
+      Handler: lambda_function.handler
+      Role: !GetAtt EnrichmentRole.Arn
+      Timeout: 180
+      MemorySize: 1024
+      Environment:
+        Variables:
+          FINDINGS_TABLE: !Ref FindingsTable
+          APPROVALS_TABLE: !Ref ApprovalsTable
+          PROMPT_REGISTRY_TABLE: !Ref PromptRegistryTable
+          APPROVAL_TOPIC_ARN: !Ref ApprovalNotificationTopic
+          OPENAI_API_KEY: !Ref OpenAIApiKey
+          ENVIRONMENT: !Ref Environment
+      Code:
+        ZipFile: |
+          # Placeholder - replaced by CI/CD
+          def handler(event, context):
+              return {"statusCode": 200, "body": "Enrichment not deployed yet"}
+
+  TeardownFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub cost-janitor-teardown-${Environment}
+      Runtime: python3.11
+      Handler: lambda_function.handler
+      Role: !GetAtt TeardownRole.Arn
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          FINDINGS_TABLE: !Ref FindingsTable
+          APPROVALS_TABLE: !Ref ApprovalsTable
+          CONFIG_TABLE: !Ref ConfigTable
+          ENVIRONMENT: !Ref Environment
+      Code:
+        ZipFile: |
+          # Placeholder - replaced by CI/CD
+          def handler(event, context):
+              return {"statusCode": 200, "body": "Teardown not deployed yet"}
+
+  # ============================================================
+  # API GATEWAY
+  # ============================================================
+  ApiGateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub cost-janitor-api-${Environment}
+      Description: Cost Janitor API
+      EndpointConfiguration:
+        Types: [REGIONAL]
+
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - FindingsResource
+      - ApprovalsResource
+      - TeardownResource
+      - ConfigResource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      StageName: !Ref Environment
+
+  # API Resources
+  FindingsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: findings
+
+  FindingsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref FindingsResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations
+
+  ApprovalsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: approvals
+
+  ApprovalsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref ApprovalsResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations
+
+  ApprovalVoteResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !Ref ApprovalsResource
+      PathPart: "{approval_id}/vote"
+
+  ApprovalVoteMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref ApprovalVoteResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations
+
+  TeardownResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: teardown
+
+  TeardownMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref TeardownResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations
+
+  ConfigResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: config
+
+  ConfigMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref ConfigResource
+      HttpMethod: ANY
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations
+
+  # API Lambda Function (handles all API routes)
+  ApiFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub cost-janitor-api-${Environment}
+      Runtime: python3.11
+      Handler: api.handler
+      Role: !GetAtt ApiRole.Arn
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          FINDINGS_TABLE: !Ref FindingsTable
+          APPROVALS_TABLE: !Ref ApprovalsTable
+          CONFIG_TABLE: !Ref ConfigTable
+          TEARDOWN_FUNCTION: !Ref TeardownFunction
+          ENVIRONMENT: !Ref Environment
+      Code:
+        ZipFile: |
+          # Placeholder - replaced by CI/CD
+          def handler(event, context):
+              return {"statusCode": 200, "body": "API not deployed yet"}
+
+  # Lambda Permissions for API Gateway
+  ApiLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ApiFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/*/*
+
+  # ============================================================
+  # EVENTBRIDGE RULE (Daily Scan)
+  # ============================================================
+  DailyScanRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub cost-janitor-daily-scan-${Environment}
+      Description: Daily cost janitor scan at 6 AM UTC
+      ScheduleExpression: "cron(0 6 * * ? *)"
+      State: ENABLED
+      Targets:
+        - Id: ScannerFunction
+          Arn: !GetAtt ScannerFunction.Arn
+
+  ScannerInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ScannerFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt DailyScanRule.Arn
+
+  # ============================================================
+  # FRONTEND HOSTING (S3 + CloudFront)
+  # ============================================================
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref FrontendBucketName
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: index.html
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              CanonicalUser: !GetAtt CloudFrontOriginAccessIdentity.S3CanonicalUserId
+            Action: s3:GetObject
+            Resource: !Sub ${FrontendBucket.Arn}/*
+
+  CloudFrontOriginAccessIdentity:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: !Sub cost-janitor-oai-${Environment}
+
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Comment: !Sub cost-janitor-frontend-${Environment}
+        Enabled: true
+        DefaultRootObject: index.html
+        Origins:
+          - DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            Id: S3Origin
+            S3OriginConfig:
+              OriginAccessIdentity: !Sub origin-access-identity/cloudfront/${CloudFrontOriginAccessIdentity}
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD, OPTIONS]
+          Compress: true
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+        PriceClass: PriceClass_100
+        CustomErrorResponses:
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint
+    Value: !Sub https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${Environment}
+  FrontendUrl:
+    Description: CloudFront distribution URL
+    Value: !Sub https://${CloudFrontDistribution.DomainName}
+  FindingsTableName:
+    Description: DynamoDB findings table
+    Value: !Ref FindingsTable
+  ApprovalsTableName:
+    Description: DynamoDB approvals table
+    Value: !Ref ApprovalsTable
+  ConfigTableName:
+    Description: DynamoDB config table
+    Value: !Ref ConfigTable
