@@ -16,19 +16,42 @@ CONFIG_TABLE = os.environ["CONFIG_TABLE"]
 TEARDOWN_FUNCTION = os.environ["TEARDOWN_FUNCTION"]
 ENVIRONMENT = os.environ["ENVIRONMENT"]
 
+# The UI is served from CloudFront and the API from API Gateway, so every
+# response needs CORS headers or the browser blocks the read. Without these the
+# deployed app cannot load anything, regardless of the value in the UI.
+ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "*")
+CORS_HEADERS = {
+    "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
+    "Access-Control-Allow-Headers": "Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token",
+    "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
+    "Access-Control-Max-Age": "86400",
+}
+
 
 def handler(event, context):
+    # Preflight for the browser's non-simple requests (POST/PUT with JSON).
+    if (event.get("httpMethod") or "").upper() == "OPTIONS":
+        return {"statusCode": 204, "headers": CORS_HEADERS, "body": ""}
+
+    response = route(event)
+    # Preserve any headers a route set, then add CORS.
+    response["headers"] = {**CORS_HEADERS, **(response.get("headers") or {})}
+    return response
+
+
+def route(event):
     print(f"Event: {json.dumps(event)}")
 
     http_method = event.get("httpMethod", "GET")
     path = event.get("path", "/")
-    path_params = event.get("pathParameters") or {}
     query_params = event.get("queryStringParameters") or {}
     body = json.loads(event["body"]) if event.get("body") else {}
 
     try:
         if path == "/findings" and http_method == "GET":
             return get_findings(query_params)
+        elif path.startswith("/findings/") and http_method == "GET":
+            return get_finding(path.split("/")[2])
         elif path == "/approvals" and http_method == "GET":
             return get_approvals(query_params)
         elif path.startswith("/approvals/") and path.endswith("/vote") and http_method == "POST":
@@ -96,7 +119,7 @@ def get_approvals(params: Dict) -> Dict:
 
     items = response.get("Items", [])
     for item in items:
-        finding = get_finding(item["finding_id"])
+        finding = fetch_finding(item["finding_id"])
         if finding:
             item["finding"] = finding
 
@@ -175,6 +198,14 @@ def update_config(body: Dict) -> Dict:
 
 
 def get_finding(finding_id: str) -> Dict[str, Any]:
+    """HTTP handler for GET /findings/{id}."""
+    finding = fetch_finding(finding_id)
+    if not finding:
+        return {"statusCode": 404, "body": json.dumps({"error": "Finding not found"})}
+    return {"statusCode": 200, "body": json.dumps(finding, default=str)}
+
+
+def fetch_finding(finding_id: str) -> Dict[str, Any]:
     table = dynamodb.Table(FINDINGS_TABLE)
     response = table.get_item(Key={"finding_id": finding_id})
     return response.get("Item")
