@@ -6,7 +6,7 @@ from typing import Dict, Any
 
 import boto3
 from botocore.config import Config
-import openai
+from openai import OpenAI
 
 from prompts import get_prompt, render_prompt
 
@@ -20,7 +20,8 @@ APPROVAL_TOPIC_ARN = os.environ["APPROVAL_TOPIC_ARN"]
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 ENVIRONMENT = os.environ["ENVIRONMENT"]
 
-openai.api_key = OPENAI_API_KEY
+# The v1.x SDK requires a client instance; `openai.api_key = ...` is the removed v0.x form.
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 
 def handler(event, context):
@@ -41,7 +42,7 @@ def handler(event, context):
     prompt = render_prompt(prompt_template, finding)
 
     try:
-        response = openai.chat.completions.create(
+        response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
