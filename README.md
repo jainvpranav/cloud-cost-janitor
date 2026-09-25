@@ -69,7 +69,21 @@ API_GATEWAY_ID
 git push origin main
 ```
 
-### Configure
+### Configure (Automated via Bootstrap)
+```bash
+# Install bootstrap dependencies
+pip install -r requirements-bootstrap.txt
+
+# Run bootstrap (after CloudFormation deploy)
+python bootstrap.py \
+  --stack-name cost-janitor-prod \
+  --region us-east-1 \
+  --role-arn arn:aws:iam::123456789012:role/CostJanitorScanner \
+  --account-id 123456789012 \
+  --notification-emails admin@company.com finops@company.com
+```
+
+### Configure (Manual)
 1. Visit the CloudFront URL
 2. Go to Settings
 3. Enter your cross-account Role ARN and Account ID
