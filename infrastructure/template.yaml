@@ -411,6 +411,53 @@ Resources:
         IntegrationHttpMethod: POST
         Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations
 
+  # CORS preflight. API Gateway rejects OPTIONS on a resource that has no
+  # OPTIONS method, so each resource needs one explicitly.
+  FindingsOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref FindingsResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations
+
+  # GET /findings/{finding_id} — a path part cannot contain a slash, so this has
+  # to be a nested resource rather than a PathPart like "{finding_id}".
+  FindingByIdResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !Ref FindingsResource
+      PathPart: "{finding_id}"
+
+  FindingByIdMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref FindingByIdResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations
+
+  FindingByIdOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref FindingByIdResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations
+
   ApprovalsResource:
     Type: AWS::ApiGateway::Resource
     Properties:
@@ -430,19 +477,52 @@ Resources:
         IntegrationHttpMethod: POST
         Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations
 
-  ApprovalVoteResource:
+  ApprovalsOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref ApprovalsResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arnaws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations
+
+  # /approvals/{approval_id}/vote — split across two resources because an API
+  # Gateway PathPart is a single segment and cannot contain a slash.
+  ApprovalByIdResource:
     Type: AWS::ApiGateway::Resource
     Properties:
       RestApiId: !Ref ApiGateway
       ParentId: !Ref ApprovalsResource
-      PathPart: "{approval_id}/vote"
+      PathPart: "{approval_id}"
+
+  ApprovalVoteResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !Ref ApprovalByIdResource
+      PathPart: vote
 
   ApprovalVoteMethod:
     Type: AWS::ApiGateway::Method
     Properties:
       RestApiId: !Ref ApiGateway
+        ResourceId: !Ref ApprovalVoteResource
+        HttpMethod: POST
+        AuthorizationType: NONE
+        Integration:
+          Type: AWS_PROXY
+          IntegrationHttpMethod: POST
+          Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations
+
+  ApprovalVoteOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
       ResourceId: !Ref ApprovalVoteResource
-      HttpMethod: POST
+      HttpMethod: OPTIONS
       AuthorizationType: NONE
       Integration:
         Type: AWS_PROXY
@@ -468,6 +548,18 @@ Resources:
         IntegrationHttpMethod: POST
         Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations
 
+  TeardownOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref TeardownResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations
+
   ConfigResource:
     Type: AWS::ApiGateway::Resource
     Properties:
@@ -481,6 +573,18 @@ Resources:
       RestApiId: !Ref ApiGateway
       ResourceId: !Ref ConfigResource
       HttpMethod: ANY
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations
+
+  ConfigOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref ConfigResource
+      HttpMethod: OPTIONS
       AuthorizationType: NONE
       Integration:
         Type: AWS_PROXY
@@ -504,6 +608,9 @@ Resources:
           CONFIG_TABLE: !Ref ConfigTable
           TEARDOWN_FUNCTION: !Ref TeardownFunction
           ENVIRONMENT: !Ref Environment
+          # The UI is served from CloudFront, so the browser origin differs from
+          # the API origin and CORS must name it explicitly.
+          ALLOWED_ORIGIN: !Sub https://${CloudFrontDistribution.DomainName}
       Code:
         ZipFile: |
           # Placeholder - replaced by CI/CD
