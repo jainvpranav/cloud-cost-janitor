@@ -180,6 +180,22 @@ Modify scanner config to accept array of role ARNs (code change required).
 | Teardown | `APPROVALS_TABLE` | Stack output |
 | Teardown | `CONFIG_TABLE` | Stack output |
 | API | `TEARDOWN_FUNCTION` | Stack output |
+| API | `ALLOWED_ORIGIN` | CloudFront domain (set by the template) |
+
+`ALLOWED_ORIGIN` becomes the `Access-Control-Allow-Origin` header. The UI and the
+API are on different origins, so this must match the CloudFront domain or the
+browser will block every read. The template sets it automatically. If you override
+it, use the exact scheme and host with no trailing slash, e.g.
+`https://d111111abcdef8.cloudfront.net`.
+
+### Frontend Build Variables
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `REACT_APP_API_URL` | yes | API base URL from the `ApiUrl` stack output. Baked into the bundle at build time. |
+
+Set this in the frontend CI workflow before `npm run build`. Create React App only
+exposes `REACT_APP_`-prefixed variables, and a build with this unset produces a
+bundle that cannot reach the API.
 
 ---
 
@@ -209,6 +225,27 @@ curl "$API/config"
 FRONTEND=$(aws cloudformation describe-stacks --stack-name cost-janitor-prod --query 'Stacks[0].Outputs[?OutputKey==`FrontendUrl`].OutputValue' --output text)
 open "$FRONTEND"
 ```
+
+### 4a. Verify CORS
+
+The browser blocks cross-origin reads silently, so check this explicitly rather than
+inferring it from the page looking empty.
+
+```bash
+API=$(aws cloudformation describe-stacks --stack-name cost-janitor-prod --query 'Stacks[0].Outputs[?OutputKey==`ApiEndpoint`].OutputValue' --output text)
+
+# Preflight must return 204 with the allow headers
+curl -i -X OPTIONS "$API/findings" \
+  -H "Origin: $FRONTEND" \
+  -H "Access-Control-Request-Method: GET"
+
+# A real read must include Access-Control-Allow-Origin
+curl -i "$API/findings" -H "Origin: $FRONTEND" | grep -i access-control-allow-origin
+```
+
+If preflight returns `403 Missing Authentication Token`, the resource has no
+`OPTIONS` method in the template. If the header is missing entirely, check
+`ALLOWED_ORIGIN` on the API Lambda.
 
 ### 5. Check CloudWatch Logs
 ```bash

@@ -245,6 +245,49 @@ aws cloudfront create-invalidation --distribution-id <id> --paths "/*"
 
 ---
 
+### 6a. Local Dev: "Cannot GET /findings" or Empty Dashboard
+
+#### Symptoms
+- `Could not load findings` in the UI, sometimes followed by a raw HTML page
+- Every KPI, chart and table is empty but there is no error
+- Browser console shows `GET http://localhost:3000/findings 404`
+- Votes appear to succeed but nothing changes
+
+#### Cause
+`REACT_APP_API_URL` is not set, so the frontend sends **relative** requests. Those
+go to the CRA dev server, not the API. The dev server answers an unknown path with
+`Cannot GET /findings` (axios does not send an `Accept: text/html` header, so
+`historyApiFallback` does not apply).
+
+This used to fail silently: the HTML body landed in `res.data`, `res.data?.items`
+resolved to `undefined`, and every list endpoint reported success with zero items —
+a plausible-looking but completely empty dashboard. The client now detects an HTML
+body and raises a visible error instead.
+
+#### Fix
+```bash
+cd frontend
+cp .env.example .env      # Windows: copy .env.example .env
+# edit .env:
+#   REACT_APP_API_URL=https://{api-id}.execute-api.{region}.amazonaws.com/{stage}
+npm start                 # restart required: CRA reads .env at startup
+```
+
+Confirm the proxy picked it up — startup should log:
+```
+[setupProxy] proxying /findings, /approvals, /teardown, /config -> https://...
+```
+
+If it logs `[setupProxy] REACT_APP_API_URL is not set`, the `.env` is missing,
+misnamed, or missing the `REACT_APP_` prefix.
+
+#### Verify
+```bash
+curl http://localhost:3000/findings     # should return JSON, not HTML
+```
+
+---
+
 ### 7. High Costs / Unexpected Charges
 
 #### Diagnosis
