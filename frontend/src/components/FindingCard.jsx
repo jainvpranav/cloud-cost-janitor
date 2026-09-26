@@ -159,6 +159,22 @@ function TagList({ tags = {}, max = 6 }) {
   );
 }
 
+const PRICE_SOURCE = {
+  pricing_api: { label: 'AWS Pricing API', tone: 'success', hint: 'Live on-demand price from AWS' },
+  table: { label: 'List price', tone: 'neutral', hint: 'us-east-1 on-demand list price, 730-hour month' },
+  default: { label: 'Estimate', tone: 'warn', hint: 'Instance type not in the price table; flat estimate' },
+};
+
+export function PriceSource({ source }) {
+  const meta = PRICE_SOURCE[source];
+  if (!meta) return null;
+  return (
+    <span className="metric-hint" title={meta.hint}>
+      <Badge tone={meta.tone}>{meta.label}</Badge>
+    </span>
+  );
+}
+
 /* ==========================================================================
    Detail drawer content — shared by the card and the table row
    ========================================================================== */
@@ -182,6 +198,7 @@ function FindingDetail({ finding }) {
         <div className="metric">
           <span className="metric-label">Monthly cost</span>
           <Money amount={finding.monthly_cost_usd} size="lg" />
+          <PriceSource source={finding.price_source} />
         </div>
         <div className="metric">
           <span className="metric-label">Annualised</span>

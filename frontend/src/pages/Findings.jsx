@@ -54,7 +54,7 @@ const COLUMNS = [
 
 export const Findings = () => {
   const navigate = useNavigate();
-  const { findings, loading, loadingMore, error, hasMore, refetch, loadMore, fetchedAt } = useFindings({ limit: 500 });
+  const { findings, loading, loadingMore, error, hasMore, refetch, loadMore, fetchedAt } = useFindings({ limit: 500, pollMs: 5000 });
 
   const [tab, setTab] = useState('all');
   const [query, setQuery] = useState('');

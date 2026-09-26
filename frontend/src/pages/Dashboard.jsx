@@ -28,7 +28,8 @@ import {
   TableRow,
   Tabs,
 } from '../components/UI';
-import { useApprovals, useFindings } from '../hooks/useApi';
+import { useApprovals, useApprover, useFindings } from '../hooks/useApi';
+import { ActivityFeed, RunScanButton } from '../components/Live';
 import { approvalsApi, toMessage } from '../api/client';
 import { computeMetrics, costTone, STATUS } from '../lib/metrics';
 import { buildInsights, SEVERITY_META } from '../lib/insights';
@@ -38,7 +39,7 @@ const TYPE_TONE = { EC2: 'var(--viz-1)', EBS: 'var(--viz-3)', ELB: 'var(--viz-2)
 
 const TABS = [
   { id: 'all', label: 'All' },
-  { id: STATUS.PENDING_ENRICHMENT, label: 'Enriching' },
+  { id: STATUS.PENDING_ENRICHMENT, label: 'Detected' },
   { id: STATUS.PENDING_APPROVAL, label: 'Awaiting review' },
   { id: STATUS.APPROVED, label: 'Approved' },
   { id: STATUS.TEARDOWN_COMPLETE, label: 'Reclaimed' },
@@ -47,10 +48,11 @@ const TABS = [
 
 export const Dashboard = () => {
   const navigate = useNavigate();
-  const { findings, loading, loadingMore, error, hasMore, refetch, loadMore, fetchedAt } = useFindings({ limit: 200 });
+  const { findings, loading, loadingMore, error, hasMore, refetch, loadMore, fetchedAt } = useFindings({ limit: 200, pollMs: 3000 });
   // Every status, so the throughput KPIs (approval rate, turnaround, expiry)
   // are real rather than always blank.
-  const { approvals } = useApprovals({ status: 'all', limit: 200 });
+  const { approvals } = useApprovals({ status: 'all', limit: 200, pollMs: 3000 });
+  const [approver] = useApprover();
 
   const [tab, setTab] = useState('all');
   const [query, setQuery] = useState('');
@@ -82,16 +84,20 @@ export const Dashboard = () => {
   }, [findings, tab, query]);
 
   const vote = async (findingId, decision) => {
+    if (!approver) {
+      setActionError('Enter your name in "Approving as" at the top of the page before voting.');
+      return;
+    }
     setPendingId(findingId);
     setActionError(null);
     try {
-      // The scanner creates exactly one approval per finding, keyed appr-<finding_id>.
+      // One approval per finding, keyed appr-<finding_id> (created by the agent's teardown plan).
       const res = await approvalsApi.list({ status: 'PENDING', limit: 200 });
       const match = (res.data?.items || []).find(
         (a) => a.finding_id === findingId || a.approval_id === `appr-${findingId}`
       );
       if (!match) throw new Error('No pending approval exists for this finding. It may already be decided.');
-      await approvalsApi.vote(match.approval_id, decision, 'current-user');
+      await approvalsApi.vote(match.approval_id, decision, approver);
       await refetch();
     } catch (e) {
       setActionError(toMessage(e, 'Could not record your vote'));
@@ -148,10 +154,11 @@ export const Dashboard = () => {
         subtitle="Every idle resource AWS is still billing you for, ranked by what it costs to keep ignoring."
         actions={
           <>
-            <Button variant="secondary" icon="refresh" onClick={refetch} loading={loading}>
+            <RunScanButton onFinished={() => refetch()} />
+            <Button variant="secondary" icon="refresh" onClick={() => refetch()} loading={loading}>
               Refresh
             </Button>
-            <Button variant="primary" icon="gauge" onClick={() => navigate('/insights')}>
+            <Button variant="secondary" icon="gauge" onClick={() => navigate('/insights')}>
               Deep-dive
             </Button>
           </>
@@ -233,6 +240,11 @@ export const Dashboard = () => {
             }
           />
         </div>
+      </section>
+
+      {/* ---------------- Live agent activity ---------------- */}
+      <section className="section">
+        <ActivityFeed />
       </section>
 
       {/* ---------------- Insights ---------------- */}

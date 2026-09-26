@@ -48,8 +48,9 @@ export function percent(value, { decimals = 0, of = 1 } = {}) {
   return `${((n / of) * 100).toFixed(decimals)}%`;
 }
 
+/** Format a 0–1 ratio as a percentage: pct(0.9) === "90%". */
 export function pct(value, decimals = 0) {
-  return percent(value, { decimals, of: 100 });
+  return percent(value, { decimals, of: 1 });
 }
 
 export function bytes(value) {

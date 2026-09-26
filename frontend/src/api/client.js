@@ -92,4 +92,16 @@ export const configApi = {
   update: (config) => api.put('/config', config),
 };
 
+export const scanApi = {
+  start: () => api.post('/scan', {}),
+};
+
+export const jobsApi = {
+  get: (jobId) => api.get(`/jobs/${encodeURIComponent(jobId)}`),
+};
+
+export const activityApi = {
+  list: (params = {}) => api.get('/activity', { params }),
+};
+
 export default api;
