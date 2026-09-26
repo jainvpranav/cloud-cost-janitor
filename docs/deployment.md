@@ -1,138 +1,108 @@
 # Deployment Guide
 
-## Prerequisites
+After a one-time setup, every push to `master` deploys the whole platform: API, MCP endpoint for the agent, dashboard and the daily scan. Demo resources are separate and only exist when someone creates them.
 
-### AWS Account Setup
-1. **Target Account** (where resources are scanned):
-   - Create IAM role `CostJanitorScanner` with trust policy:
-   ```json
-   {
-     "Version": "2012-10-17",
-     "Statement": [{
-       "Effect": "Allow",
-       "Principal": { "AWS": "arn:aws:iam::DEPLOY_ACCOUNT:root" },
-       "Action": "sts:AssumeRole",
-       "Condition": { "StringEquals": { "sts:ExternalId": "cost-janitor-prod" } }
-     }]
-   }
-   ```
-   - Attach policy: `arn:aws:iam::aws:policy/ReadOnlyAccess` (or custom least-privilege)
+## What gets deployed
 
-2. **Deployment Account** (where stack runs):
-   - Admin permissions for CloudFormation, Lambda, DynamoDB, API Gateway, S3, CloudFront, SNS, IAM
+| Stack | Template | How | When |
+|---|---|---|---|
+| `cost-janitor-github-oidc` | `infrastructure/github-oidc.yaml` | By hand, once | Before the first push |
+| `cost-janitor-prod` | `infrastructure/template.yaml` | `deploy.yml` workflow | Every push to `master` |
+| `janitor-demo` | `infrastructure/demo/idle-resources.yaml` | `demo-resources.yml` workflow, `create` | Only on request; auto-deleted after `DEMO_TTL_HOURS` |
 
-### Required Tools
-- AWS CLI v2 configured
-- GitHub repository
-- OpenAI API key
+## One-time setup
 
----
+### 1. Deploy the OIDC stack
 
-## Manual Deployment (One-Time)
+Run with admin credentials in the target account (a sandbox, not one with real workloads):
 
-### 1. Create Artifacts Bucket
-```bash
-aws s3 mb s3://your-artifacts-bucket --region us-east-1
-aws s3api put-bucket-versioning --bucket your-artifacts-bucket --versioning-configuration Status=Enabled
-```
-
-### 2. Create Frontend Bucket
-```bash
-aws s3 mb s3://your-frontend-bucket --region us-east-1
-aws s3 website s3://your-frontend-bucket --index-document index.html --error-document index.html
-```
-
-### 3. Deploy CloudFormation Stack
 ```bash
 aws cloudformation deploy \
-  --template-file infrastructure/template.yaml \
-  --stack-name cost-janitor-prod \
+  --stack-name cost-janitor-github-oidc \
+  --template-file infrastructure/github-oidc.yaml \
   --capabilities CAPABILITY_NAMED_IAM \
-  --parameter-overrides \
-    Environment=prod \
-    OpenAIApiKey=sk-your-openai-key \
-    NotificationEmail=admin@company.com \
-    FrontendBucketName=your-frontend-bucket \
-  --region us-east-1
+  --region us-east-1 \
+  --parameter-overrides BudgetEmail=<your-email>
 ```
 
-### 4. Get Stack Outputs
+It creates:
+
+- the GitHub OIDC identity provider (pass `ExistingOidcProviderArn=<arn>` if the account already has one; only one is allowed)
+- `cost-janitor-github-deploy`, a role GitHub Actions assumes, trusted only for this repo's `master` branch and `prod` environment
+- the Lambda artifacts bucket (30-day expiry)
+- a $20/month AWS Budget with email alerts at 25%, 50%, 80% and a 100% forecast
+
+Read the outputs:
+
 ```bash
-aws cloudformation describe-stacks --stack-name cost-janitor-prod --query 'Stacks[0].Outputs'
+aws cloudformation describe-stacks --stack-name cost-janitor-github-oidc \
+  --query 'Stacks[0].Outputs' --output table
 ```
 
-### 5. Configure GitHub Secrets
-Go to GitHub repo → Settings → Secrets → Actions → New repository secret:
+### 2. Configure GitHub
 
-| Secret | Value |
-|--------|-------|
-| `AWS_DEPLOY_ROLE_ARN` | Role for GitHub Actions (with CloudFormation/Lambda/S3/CloudFront permissions) |
-| `ARTIFACTS_BUCKET` | your-artifacts-bucket |
-| `OPENAI_API_KEY` | sk-your-openai-key |
-| `NOTIFICATION_EMAIL` | admin@company.com |
-| `FRONTEND_BUCKET` | your-frontend-bucket |
-| `CLOUDFRONT_DISTRIBUTION_ID` | From stack output `FrontendUrl` |
-| `API_GATEWAY_ID` | From stack output `ApiEndpoint` |
+GitHub → Settings → Environments → create `prod`. Then Settings → Secrets and variables → Actions, scoped to `prod`:
 
-### 6. Run Bootstrap
+| Name | Kind | Required | Value |
+|---|---|---|---|
+| `AWS_DEPLOY_ROLE_ARN` | Secret | Yes | `DeployRoleArn` output |
+| `NOTIFICATION_EMAIL` | Secret | Yes | Team email for SNS notices (confirm the subscription email) |
+| `OPENAI_API_KEY` | Secret | No | Only if `ENRICHMENT_ENABLED=true` |
+| `ARTIFACTS_BUCKET` | Variable | Yes | `ArtifactsBucketName` output |
+| `FRONTEND_BUCKET_NAME` | Variable | Yes | Globally unique, must start with `cost-janitor-`, e.g. `cost-janitor-frontend-<team>-<random>` |
+| `AWS_REGION` | Variable | No | Default `us-east-1` |
+| `DEMO_TTL_HOURS` | Variable | No | Default `8` (max 24) |
+| `ENRICHMENT_ENABLED` | Variable | No | Default `false`; the TrueForge agent replaces enrichment |
+| `TEARDOWN_SCOPE_TAG_VALUE` | Variable | No | Default `demo`: teardown can only delete resources tagged `CostJanitor=demo`. Set to an empty string to allow any resource. |
+
+The MCP API key is **not** stored in GitHub. The stack creates it; read it after the first deploy (below) and store it only in TrueForge.
+
+### 3. Push
+
+Merge to `master`. `deploy.yml` runs:
+
+1. **test**: backend tests, `cfn-lint`, Lambda packaging, frontend tests and build (the same as `ci.yml`)
+2. **backend**: package 5 Lambdas → upload → deploy `cost-janitor-prod` → update Lambda code → redeploy the API stage → smoke test (`/findings` 200, CORS preflight, `/mcp` rejects calls without a key)
+3. **frontend**: build with the stack's `ApiEndpoint` → upload (hashed assets cached for a year, `index.html` never cached) → CloudFront invalidation
+
+The first run takes 10–15 minutes because CloudFront is created. The job summary lists `FrontendUrl`, `ApiEndpoint`, `McpEndpoint` and `McpApiKeyId`.
+
+### 4. Get the MCP API key
+
+```bash
+aws apigateway get-api-key --api-key <McpApiKeyId> --include-value --query value --output text
+```
+
+Paste it into TrueForge's secret store and send it as the `x-api-key` header to `McpEndpoint`. See `agent/janitor-agent.md`.
+
+### 5. Seed configuration (optional)
+
+The scanner works with built-in defaults. To write scan config and guardrails explicitly (single account: leave the role ARN empty):
+
 ```bash
 pip install -r requirements-bootstrap.txt
-python bootstrap.py \
-  --stack-name cost-janitor-prod \
-  --region us-east-1 \
-  --role-arn arn:aws:iam::TARGET_ACCOUNT:role/CostJanitorScanner \
-  --account-id TARGET_ACCOUNT \
-  --notification-emails admin@company.com finops@company.com
+python bootstrap.py --stack-name cost-janitor-prod --region us-east-1 --role-arn "" --account-id <account-id>
 ```
 
-### 7. Trigger First Scan
+## Demo resources
+
+GitHub → Actions → **Demo resources** → Run workflow → `create`. It deploys `janitor-demo` into the default VPC (about $0.062/hour) and schedules deletion after `DEMO_TTL_HOURS`. An hourly scheduled run deletes it once expired; `delete` removes it immediately. See [operations.md](operations.md#demo-runbook).
+
+## Pipeline reference
+
+| Workflow | Trigger | Purpose |
+|---|---|---|
+| `ci.yml` | Pull requests, pushes to other branches, called by `deploy.yml` | Tests, lint, package, build |
+| `deploy.yml` | Push to `master`, manual | Deploy platform |
+| `demo-resources.yml` | Manual (`create` / `delete`), hourly schedule | Demo stack lifecycle |
+
 ```bash
-aws events put-events --entries '[{"Source":"cost-janitor","DetailType":"ManualScan","Detail":"{}"}]' --region us-east-1
+gh workflow run deploy.yml
+gh workflow run demo-resources.yml -f action=create
+gh workflow run demo-resources.yml -f action=delete
 ```
 
----
-
-## CI/CD Pipeline Setup
-
-### GitHub Actions Permissions
-Create IAM role for GitHub Actions with trust policy:
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Principal": { "Federated": "arn:aws:iam::DEPLOY_ACCOUNT:oidc-provider/token.actions.githubusercontent.com" },
-    "Action": "sts:AssumeRoleWithWebIdentity",
-    "Condition": {
-      "StringLike": {
-        "token.actions.githubusercontent.com:sub": "repo:YOUR_ORG/YOUR_REPO:*"
-      }
-    }
-  }]
-}
-```
-
-Attach policies:
-- `AWSCloudFormationFullAccess`
-- `AWSLambda_FullAccess`
-- `AmazonDynamoDBFullAccess`
-- `AmazonAPIGatewayAdministrator`
-- `AmazonS3FullAccess`
-- `CloudFrontFullAccess`
-- `IAMFullAccess` (for role creation)
-
-Use this role ARN as `AWS_DEPLOY_ROLE_ARN`.
-
-### Pipeline Triggers
-- **Backend**: Push to `main` with changes in `backend/**` or `infrastructure/**`
-- **Frontend**: Push to `main` with changes in `frontend/**`
-
-### Manual Trigger
-```bash
-# Via GitHub CLI
-gh workflow run backend.yml
-gh workflow run frontend.yml
-```
+If the very first deploy fails, CloudFormation leaves the stack in `ROLLBACK_COMPLETE`; the next run deletes it and starts over automatically.
 
 ---
 

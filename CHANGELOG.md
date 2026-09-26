@@ -5,6 +5,34 @@ All notable changes to Cloud Cost Janitor will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- MCP server (`backend/mcp_server/`) with ten tools for the TrueForge agent, served at `/mcp` behind an API key; agent prompt in `agent/janitor-agent.md`.
+- Jobs and activity tables; `POST /scan`, `GET /jobs/{id}`, `GET /activity`.
+- Dashboard: live agent activity feed, Run scan button, job progress for dry runs and teardowns, "Approving as" name, demo-mode chip, price-source badge, 3-second polling.
+- Demo stack (`infrastructure/demo/idle-resources.yaml`) created only on request and auto-deleted after `DEMO_TTL_HOURS`; demo profile, reset and snapshot cleanup scripts.
+- One-time `github-oidc.yaml` stack: GitHub OIDC deploy role, artifacts bucket, $20 budget alerts.
+- `scripts/local_stack.py`: the whole backend against a simulated AWS account.
+- Backend test suite (moto) and `ci.yml`.
+
+### Fixed
+- Every DynamoDB write failed because floats were stored instead of Decimals.
+- Scanner crashed on every run (`ScanConfig` had no `role_arn`/`account_id`).
+- API Lambda role trusted API Gateway instead of Lambda, so the first deploy could not create the function.
+- API deployment could be created before its methods existed, and never picked up new routes.
+- Teardown role lacked `dynamodb:PutItem` and `ec2:DescribeSnapshots`: deletes were never recorded and EBS teardown failed after the snapshot.
+- Load balancer tags were never read (prod LBs could be flagged) and the CloudWatch request metric used the wrong dimension.
+- Instances with no CloudWatch data were treated as idle.
+- Teardown now re-checks live tags and that the resource is still idle, is idempotent, and reads guardrails from config.
+- Pricing: 730-hour month, sc1 and Gateway LB rates corrected, live Pricing API wired in.
+- CORS headers on API Gateway errors (4xx/5xx) and on invalid JSON bodies.
+- Every vote was cast as `current-user`, so dual approval could never complete.
+- `GET /approvals` without a status returned only pending items; `PUT /config` overwrote unrelated fields.
+- Percentages rendered 100× too small; the confidence bar was nearly empty at 90%.
+- Dev proxy crashed on start and returned API JSON on page reloads of `/approvals` and `/findings`.
+- Workflows triggered on `main` instead of `master`, needed secrets that only exist after the first deploy, and cached `index.html` for a year.
+
 ## [1.0.0] - 2024-01-15
 
 ### Added
