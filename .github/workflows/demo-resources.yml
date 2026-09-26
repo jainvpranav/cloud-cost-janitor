@@ -1,0 +1,122 @@
+name: Demo resources
+
+# Creates or deletes the janitor-demo stack (about $0.062/hour). Never runs on push.
+# The hourly schedule deletes the stack once its ExpiresAt time has passed.
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: create or delete the demo resources
+        type: choice
+        options: [create, delete]
+        default: create
+      ttl_hours:
+        description: Hours until automatic deletion (default DEMO_TTL_HOURS or 8)
+        type: string
+        default: ''
+  schedule:
+    - cron: '17 * * * *'
+
+concurrency:
+  group: demo-resources
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  DEMO_STACK: janitor-demo
+
+jobs:
+  demo:
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Current state
+        id: state
+        run: |
+          status="$(aws cloudformation describe-stacks --stack-name "$DEMO_STACK" --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo NONE)"
+          expires="$(aws cloudformation describe-stacks --stack-name "$DEMO_STACK" --query "Stacks[0].Outputs[?OutputKey=='ExpiresAt'].OutputValue" --output text 2>/dev/null || true)"
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          echo "expires=$expires" >> "$GITHUB_OUTPUT"
+          echo "Demo stack: $status (expires ${expires:-n/a})"
+
+      - name: Expire
+        if: github.event_name == 'schedule'
+        env:
+          STATUS: ${{ steps.state.outputs.status }}
+          EXPIRES: ${{ steps.state.outputs.expires }}
+        run: |
+          [ "$STATUS" = "NONE" ] && { echo "No demo stack."; exit 0; }
+          now="$(date -u +%s)"
+          if [ -z "$EXPIRES" ] || [ "$EXPIRES" = "None" ]; then
+            echo "No ExpiresAt output (status $STATUS); deleting to be safe."
+          elif [ "$(date -u -d "$EXPIRES" +%s)" -gt "$now" ]; then
+            echo "Not expired yet."; exit 0
+          fi
+          aws cloudformation delete-stack --stack-name "$DEMO_STACK"
+          aws cloudformation wait stack-delete-complete --stack-name "$DEMO_STACK"
+          echo "Deleted expired demo stack." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Delete
+        if: github.event_name == 'workflow_dispatch' && inputs.action == 'delete'
+        run: |
+          if [ "${{ steps.state.outputs.status }}" = "NONE" ]; then echo "Nothing to delete."; exit 0; fi
+          aws cloudformation delete-stack --stack-name "$DEMO_STACK"
+          aws cloudformation wait stack-delete-complete --stack-name "$DEMO_STACK"
+          echo "Demo stack deleted." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create
+        if: github.event_name == 'workflow_dispatch' && inputs.action == 'create'
+        env:
+          TTL_INPUT: ${{ inputs.ttl_hours }}
+          TTL_DEFAULT: ${{ vars.DEMO_TTL_HOURS || '8' }}
+          STATUS: ${{ steps.state.outputs.status }}
+        run: |
+          ttl="${TTL_INPUT:-$TTL_DEFAULT}"
+          case "$ttl" in ''|*[!0-9]*) echo "::error::ttl_hours must be a whole number"; exit 1;; esac
+          if [ "$ttl" -gt 24 ]; then echo "::error::ttl_hours above 24 is not allowed on a \$20 budget"; exit 1; fi
+
+          if [ "$STATUS" = "ROLLBACK_COMPLETE" ]; then
+            aws cloudformation delete-stack --stack-name "$DEMO_STACK"
+            aws cloudformation wait stack-delete-complete --stack-name "$DEMO_STACK"
+          fi
+
+          vpc="$(aws ec2 describe-vpcs --filters Name=is-default,Values=true --query 'Vpcs[0].VpcId' --output text)"
+          if [ -z "$vpc" ] || [ "$vpc" = "None" ]; then
+            echo "::error::No default VPC in $AWS_REGION. Create one with: aws ec2 create-default-vpc"; exit 1
+          fi
+          # Two default subnets in different AZs; skip us-east-1e, which has no t3 capacity.
+          read -r subnet_a subnet_b < <(aws ec2 describe-subnets \
+            --filters Name=vpc-id,Values="$vpc" Name=default-for-az,Values=true \
+            --query 'Subnets[].[AvailabilityZone,SubnetId]' --output text \
+            | grep -v 'us-east-1e' | sort | awk '{print $2}' | head -2 | xargs)
+          if [ -z "$subnet_b" ]; then echo "::error::Need default subnets in two Availability Zones"; exit 1; fi
+
+          expires="$(date -u -d "+$ttl hours" +%Y-%m-%dT%H:%M:%SZ)"
+          aws cloudformation deploy \
+            --stack-name "$DEMO_STACK" \
+            --template-file infrastructure/demo/idle-resources.yaml \
+            --no-fail-on-empty-changeset \
+            --tags CostJanitor=demo Project=janitor-demo "ExpiresAt=$expires" \
+            --parameter-overrides "VpcId=$vpc" "SubnetA=$subnet_a" "SubnetB=$subnet_b" "ExpiresAt=$expires"
+
+          {
+            echo "### Demo resources created"
+            echo "Deleted automatically after **$expires** (UTC)."
+            echo
+            aws cloudformation describe-stacks --stack-name "$DEMO_STACK" \
+              --query 'Stacks[0].Outputs[].[OutputKey,OutputValue]' --output text \
+              | awk 'BEGIN{print "| Output | Value |\n|---|---|"} {k=$1; $1=""; print "| " k " |" $0 " |"}'
+            echo
+            echo "Wait about 60 minutes for CPU metrics before scanning with the demo profile."
+          } >> "$GITHUB_STEP_SUMMARY"
