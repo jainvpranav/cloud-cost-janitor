@@ -103,6 +103,14 @@ def test_no_tool_can_vote(tools):
     assert not any("vote" in t.name or "approve" == t.name for t in listed)
 
 
+def test_annotations_mark_only_teardown_destructive(tools):
+    listed = {t.name: t.annotations for t in asyncio.run(tools.mcp.list_tools())}
+    assert [n for n, a in listed.items() if a.destructive_hint] == ["execute_teardown"]
+    assert {n for n, a in listed.items() if a.read_only_hint} == {
+        "get_job_status", "list_idle_instances", "list_orphaned_volumes", "list_idle_load_balancers",
+        "get_cost_summary", "get_approval_status"}
+
+
 def _mcp_event(body):
     return {"resource": "/mcp", "path": "/mcp", "httpMethod": "POST",
             "headers": {"Host": "abc.execute-api.us-east-1.amazonaws.com", "Content-Type": "application/json",

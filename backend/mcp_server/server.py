@@ -4,6 +4,7 @@ from typing import Any, Callable, Dict, List, Literal, Optional
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.types import ToolAnnotations
 
 import janitor_tools as jt
 from common import activity
@@ -15,6 +16,12 @@ INSTRUCTIONS = (
 )
 
 mcp = MCPServer("cost-janitor", instructions=INSTRUCTIONS, version="1.0.0")
+
+# Hints let agent harnesses pick tools by effect, e.g. TrueForge's @read-only and @destructive selectors.
+# They are advisory: the approval check in execute_teardown is what actually blocks deletes.
+READ = ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=True)
+WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=True)
+DESTRUCTIVE = ToolAnnotations(read_only_hint=False, destructive_hint=True, idempotent_hint=True, open_world_hint=True)
 
 
 def logged(fn: Callable) -> Callable:
@@ -76,7 +83,7 @@ def _summary(tool: str, result: Any) -> str:
     return ", ".join(f"{k}={v}" for k, v in result.items())[:400]
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE)
 @logged
 def run_scan() -> dict:
     """Start a scan of the AWS account for idle EC2 instances, orphaned EBS volumes and idle load balancers.
@@ -87,42 +94,42 @@ def run_scan() -> dict:
     return jt.start_scan()
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 @logged
 def get_job_status(job_id: str) -> dict:
     """Get the status of a scan or teardown job: QUEUED, RUNNING, SUCCEEDED, FAILED or REFUSED, plus its result."""
     return jt.job_status(job_id)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 @logged
 def list_idle_instances() -> dict:
     """List open findings for running EC2 instances with low CPU and network traffic, with evidence and monthly cost."""
     return jt.list_open("EC2")
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 @logged
 def list_orphaned_volumes() -> dict:
     """List open findings for EBS volumes that are not attached to any instance, with age, snapshot history and cost."""
     return jt.list_open("EBS")
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 @logged
 def list_idle_load_balancers() -> dict:
     """List open findings for load balancers with no healthy targets and no traffic, with monthly cost."""
     return jt.list_open("ELB")
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 @logged
 def get_cost_summary() -> dict:
     """Summarize open waste (monthly and annual, by resource type), items awaiting approval, and savings already reclaimed."""
     return jt.cost_summary()
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE)
 @logged
 def record_assessment(
     finding_id: str,
@@ -139,7 +146,7 @@ def record_assessment(
     return jt.assess(finding_id, risk, recommendation, confidence, reasoning)
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE)
 @logged
 def draft_teardown_plan(finding_ids: List[str]) -> dict:
     """Create approval requests for the given findings and return the teardown plan with savings.
@@ -151,14 +158,14 @@ def draft_teardown_plan(finding_ids: List[str]) -> dict:
     return jt.draft_plan(finding_ids)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 @logged
 def get_approval_status(approval_ids: Optional[List[str]] = None) -> dict:
     """Show whether approval requests are PENDING, APPROVED or REJECTED and who voted. Omit ids to list all open ones."""
     return jt.approval_status(approval_ids)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 @logged
 def execute_teardown(approval_id: str) -> dict:
     """Delete the resource behind one APPROVED approval request. Returns a job_id to poll.
