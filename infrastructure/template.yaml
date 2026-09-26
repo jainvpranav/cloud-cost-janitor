@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'Cloud Cost Janitor - AWS Resource Scanner & Teardown System'
+Description: 'Cloud Cost Janitor - idle resource scanner, MCP endpoint for agents, approval API and dashboard'
 
 Parameters:
   Environment:
@@ -9,14 +9,26 @@ Parameters:
   OpenAIApiKey:
     Type: String
     NoEcho: true
-    Description: OpenAI API key for enrichment
+    Default: ''
+    Description: Only needed when EnrichmentEnabled is true
   FrontendBucketName:
     Type: String
-    Default: cost-janitor-frontend
+    Description: Globally unique S3 bucket name for the dashboard
   NotificationEmail:
     Type: String
-    Default: admin@company.com
     Description: Email for approval notifications
+  EnrichmentEnabled:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Call the OpenAI enrichment Lambda after each scan. The TrueForge agent replaces it.
+  TeardownScopeTagValue:
+    Type: String
+    Default: demo
+    Description: When set, teardown can only delete resources tagged CostJanitor=<value>. Empty allows any resource.
+
+Conditions:
+  ScopeTeardown: !Not [!Equals [!Ref TeardownScopeTagValue, '']]
 
 Resources:
   # ============================================================
@@ -27,6 +39,8 @@ Resources:
     Properties:
       TableName: !Sub cost-janitor-findings-${Environment}
       BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
       AttributeDefinitions:
         - AttributeName: finding_id
           AttributeType: S
@@ -59,6 +73,8 @@ Resources:
     Properties:
       TableName: !Sub cost-janitor-approvals-${Environment}
       BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
       AttributeDefinitions:
         - AttributeName: approval_id
           AttributeType: S
@@ -91,6 +107,8 @@ Resources:
     Properties:
       TableName: !Sub cost-janitor-config-${Environment}
       BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
       AttributeDefinitions:
         - AttributeName: config_key
           AttributeType: S
@@ -103,6 +121,8 @@ Resources:
     Properties:
       TableName: !Sub cost-janitor-prompts-${Environment}
       BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
       AttributeDefinitions:
         - AttributeName: model_name
           AttributeType: S
@@ -114,8 +134,48 @@ Resources:
         - AttributeName: version
           KeyType: RANGE
 
+  # Background scan and teardown jobs, so the agent and the dashboard can poll progress.
+  JobsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub cost-janitor-jobs-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      AttributeDefinitions:
+        - AttributeName: job_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: job_id
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  # One row per agent tool call or dashboard action: the live feed and the audit trail.
+  ActivityTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub cost-janitor-activity-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      AttributeDefinitions:
+        - AttributeName: day
+          AttributeType: S
+        - AttributeName: ts
+          AttributeType: S
+      KeySchema:
+        - AttributeName: day
+          KeyType: HASH
+        - AttributeName: ts
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
   # ============================================================
-  # SNS TOPIC FOR NOTIFICATIONS
+  # SNS
   # ============================================================
   ApprovalNotificationTopic:
     Type: AWS::SNS::Topic
@@ -160,6 +220,7 @@ Resources:
                   - elasticloadbalancing:DescribeLoadBalancers
                   - elasticloadbalancing:DescribeTargetGroups
                   - elasticloadbalancing:DescribeTargetHealth
+                  - elasticloadbalancing:DescribeTags
                   - cloudwatch:GetMetricStatistics
                   - cloudwatch:ListMetrics
                   - autoscaling:DescribeAutoScalingGroups
@@ -174,11 +235,9 @@ Resources:
                   - dynamodb:Scan
                 Resource:
                   - !GetAtt FindingsTable.Arn
+                  - !Sub ${FindingsTable.Arn}/index/*
                   - !GetAtt ConfigTable.Arn
-              - Effect: Allow
-                Action:
-                  - sns:Publish
-                Resource: !Ref ApprovalNotificationTopic
+                  - !GetAtt JobsTable.Arn
               - Effect: Allow
                 Action:
                   - lambda:InvokeFunction
@@ -242,23 +301,55 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
+              # Read-only checks before deleting: live tags, still idle, snapshot progress.
               - Effect: Allow
                 Action:
-                  - ec2:TerminateInstances
-                  - ec2:StopInstances
-                  - ec2:DeleteVolume
-                  - ec2:CreateSnapshot
-                  - elasticloadbalancing:DeleteLoadBalancer
-                  - elasticloadbalancingv2:DeleteLoadBalancer
+                  - ec2:DescribeInstances
+                  - ec2:DescribeVolumes
+                  - ec2:DescribeSnapshots
+                  - elasticloadbalancing:DescribeLoadBalancers
+                  - elasticloadbalancing:DescribeTargetGroups
+                  - elasticloadbalancing:DescribeTargetHealth
+                  - elasticloadbalancing:DescribeTags
+                  - cloudwatch:GetMetricStatistics
                 Resource: "*"
+              - Effect: Allow
+                Action: ec2:CreateSnapshot
+                Resource: "*"
+              - Effect: Allow
+                Action: ec2:CreateTags
+                Resource: !Sub arn:${AWS::Partition}:ec2:*::snapshot/*
+                Condition:
+                  StringEquals:
+                    ec2:CreateAction: CreateSnapshot
+              - !If
+                - ScopeTeardown
+                - Effect: Allow
+                  Action:
+                    - ec2:TerminateInstances
+                    - ec2:DeleteVolume
+                    - elasticloadbalancing:DeleteLoadBalancer
+                  Resource: "*"
+                  Condition:
+                    StringEquals:
+                      aws:ResourceTag/CostJanitor: !Ref TeardownScopeTagValue
+                - Effect: Allow
+                  Action:
+                    - ec2:TerminateInstances
+                    - ec2:DeleteVolume
+                    - elasticloadbalancing:DeleteLoadBalancer
+                  Resource: "*"
               - Effect: Allow
                 Action:
                   - dynamodb:GetItem
+                  - dynamodb:PutItem
                   - dynamodb:UpdateItem
                   - dynamodb:Query
                 Resource:
                   - !GetAtt FindingsTable.Arn
                   - !GetAtt ApprovalsTable.Arn
+                  - !GetAtt ConfigTable.Arn
+                  - !GetAtt JobsTable.Arn
               - Effect: Allow
                 Action:
                   - sts:AssumeRole
@@ -267,6 +358,7 @@ Resources:
                   StringEquals:
                     sts:ExternalId: !Sub cost-janitor-${Environment}
 
+  # Execution role for the API Lambda (it previously trusted API Gateway, which Lambda cannot assume).
   ApiRole:
     Type: AWS::IAM::Role
     Properties:
@@ -276,8 +368,10 @@ Resources:
         Statement:
           - Effect: Allow
             Principal:
-              Service: apigateway.amazonaws.com
+              Service: lambda.amazonaws.com
             Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
       Policies:
         - PolicyName: ApiPermissions
           PolicyDocument:
@@ -292,19 +386,98 @@ Resources:
                   - dynamodb:Scan
                 Resource:
                   - !GetAtt FindingsTable.Arn
+                  - !Sub ${FindingsTable.Arn}/index/*
                   - !GetAtt ApprovalsTable.Arn
+                  - !Sub ${ApprovalsTable.Arn}/index/*
                   - !GetAtt ConfigTable.Arn
+                  - !GetAtt JobsTable.Arn
+                  - !GetAtt ActivityTable.Arn
               - Effect: Allow
                 Action:
                   - lambda:InvokeFunction
                 Resource:
                   - !GetAtt TeardownFunction.Arn
+                  - !GetAtt ScannerFunction.Arn
+
+  McpRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub cost-janitor-mcp-${Environment}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: McpPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !GetAtt FindingsTable.Arn
+                  - !Sub ${FindingsTable.Arn}/index/*
+                  - !GetAtt ApprovalsTable.Arn
+                  - !Sub ${ApprovalsTable.Arn}/index/*
+                  - !GetAtt ConfigTable.Arn
+                  - !GetAtt JobsTable.Arn
+                  - !GetAtt ActivityTable.Arn
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !GetAtt ScannerFunction.Arn
+                  - !GetAtt TeardownFunction.Arn
 
   # ============================================================
-  # LAMBDA FUNCTIONS
+  # LOG GROUPS (7-day retention keeps CloudWatch cost near zero)
+  # ============================================================
+  ScannerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/cost-janitor-scanner-${Environment}
+      RetentionInDays: 7
+
+  EnrichmentLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/cost-janitor-enrichment-${Environment}
+      RetentionInDays: 7
+
+  TeardownLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/cost-janitor-teardown-${Environment}
+      RetentionInDays: 7
+
+  ApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/cost-janitor-api-${Environment}
+      RetentionInDays: 7
+
+  McpLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/cost-janitor-mcp-${Environment}
+      RetentionInDays: 7
+
+  # ============================================================
+  # LAMBDA FUNCTIONS (code is uploaded by CI after the stack deploys)
   # ============================================================
   ScannerFunction:
     Type: AWS::Lambda::Function
+    DependsOn: ScannerLogGroup
     Properties:
       FunctionName: !Sub cost-janitor-scanner-${Environment}
       Runtime: python3.11
@@ -316,9 +489,11 @@ Resources:
         Variables:
           FINDINGS_TABLE: !Ref FindingsTable
           CONFIG_TABLE: !Ref ConfigTable
+          JOBS_TABLE: !Ref JobsTable
           ENRICHMENT_FUNCTION: !Ref EnrichmentFunction
-          APPROVAL_TOPIC_ARN: !Ref ApprovalNotificationTopic
+          ENRICHMENT_ENABLED: !Ref EnrichmentEnabled
           ENVIRONMENT: !Ref Environment
+          AWS_ACCOUNT_ID: !Ref AWS::AccountId
       Code:
         ZipFile: |
           # Placeholder - replaced by CI/CD
@@ -327,13 +502,14 @@ Resources:
 
   EnrichmentFunction:
     Type: AWS::Lambda::Function
+    DependsOn: EnrichmentLogGroup
     Properties:
       FunctionName: !Sub cost-janitor-enrichment-${Environment}
       Runtime: python3.11
       Handler: lambda_function.handler
       Role: !GetAtt EnrichmentRole.Arn
       Timeout: 180
-      MemorySize: 1024
+      MemorySize: 512
       Environment:
         Variables:
           FINDINGS_TABLE: !Ref FindingsTable
@@ -350,24 +526,82 @@ Resources:
 
   TeardownFunction:
     Type: AWS::Lambda::Function
+    DependsOn: TeardownLogGroup
     Properties:
       FunctionName: !Sub cost-janitor-teardown-${Environment}
       Runtime: python3.11
       Handler: lambda_function.handler
       Role: !GetAtt TeardownRole.Arn
-      Timeout: 300
+      # EBS teardown waits for the pre-delete snapshot to complete.
+      Timeout: 900
       MemorySize: 512
       Environment:
         Variables:
           FINDINGS_TABLE: !Ref FindingsTable
           APPROVALS_TABLE: !Ref ApprovalsTable
           CONFIG_TABLE: !Ref ConfigTable
+          JOBS_TABLE: !Ref JobsTable
           ENVIRONMENT: !Ref Environment
       Code:
         ZipFile: |
           # Placeholder - replaced by CI/CD
           def handler(event, context):
               return {"statusCode": 200, "body": "Teardown not deployed yet"}
+
+  ApiFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: ApiLogGroup
+    Properties:
+      FunctionName: !Sub cost-janitor-api-${Environment}
+      Runtime: python3.11
+      Handler: api.handler
+      Role: !GetAtt ApiRole.Arn
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          FINDINGS_TABLE: !Ref FindingsTable
+          APPROVALS_TABLE: !Ref ApprovalsTable
+          CONFIG_TABLE: !Ref ConfigTable
+          JOBS_TABLE: !Ref JobsTable
+          ACTIVITY_TABLE: !Ref ActivityTable
+          TEARDOWN_FUNCTION: !Ref TeardownFunction
+          SCANNER_FUNCTION: !Ref ScannerFunction
+          ENVIRONMENT: !Ref Environment
+          # Comma-separated. The first entry is used when the request Origin is not in the list.
+          ALLOWED_ORIGIN: !Sub https://${CloudFrontDistribution.DomainName},http://localhost:3000
+      Code:
+        ZipFile: |
+          # Placeholder - replaced by CI/CD
+          def handler(event, context):
+              return {"statusCode": 200, "body": "API not deployed yet"}
+
+  McpFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: McpLogGroup
+    Properties:
+      FunctionName: !Sub cost-janitor-mcp-${Environment}
+      Runtime: python3.11
+      Handler: lambda_function.handler
+      Role: !GetAtt McpRole.Arn
+      # API Gateway cuts requests off at 29 seconds; long work runs as background jobs.
+      Timeout: 28
+      MemorySize: 512
+      Environment:
+        Variables:
+          FINDINGS_TABLE: !Ref FindingsTable
+          APPROVALS_TABLE: !Ref ApprovalsTable
+          CONFIG_TABLE: !Ref ConfigTable
+          JOBS_TABLE: !Ref JobsTable
+          ACTIVITY_TABLE: !Ref ActivityTable
+          SCANNER_FUNCTION: !Ref ScannerFunction
+          TEARDOWN_FUNCTION: !Ref TeardownFunction
+          ENVIRONMENT: !Ref Environment
+      Code:
+        ZipFile: |
+          # Placeholder - replaced by CI/CD
+          def handler(event, context):
+              return {"statusCode": 503, "body": "MCP server not deployed yet"}
 
   # ============================================================
   # API GATEWAY
@@ -376,22 +610,33 @@ Resources:
     Type: AWS::ApiGateway::RestApi
     Properties:
       Name: !Sub cost-janitor-api-${Environment}
-      Description: Cost Janitor API
+      Description: Cost Janitor API and MCP endpoint
       EndpointConfiguration:
         Types: [REGIONAL]
 
-  ApiDeployment:
-    Type: AWS::ApiGateway::Deployment
-    DependsOn:
-      - FindingsResource
-      - ApprovalsResource
-      - TeardownResource
-      - ConfigResource
+  # Errors produced by API Gateway itself (throttling, unknown route, Lambda crash or timeout)
+  # never reach the Lambda, so they need CORS headers here or the browser hides the real error.
+  GatewayResponse4xx:
+    Type: AWS::ApiGateway::GatewayResponse
     Properties:
       RestApiId: !Ref ApiGateway
-      StageName: !Ref Environment
+      ResponseType: DEFAULT_4XX
+      ResponseParameters:
+        gatewayresponse.header.Access-Control-Allow-Origin: !Sub "'https://${CloudFrontDistribution.DomainName}'"
+        gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token'"
+        gatewayresponse.header.Access-Control-Allow-Methods: "'GET,POST,PUT,DELETE,OPTIONS'"
 
-  # API Resources
+  GatewayResponse5xx:
+    Type: AWS::ApiGateway::GatewayResponse
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResponseType: DEFAULT_5XX
+      ResponseParameters:
+        gatewayresponse.header.Access-Control-Allow-Origin: !Sub "'https://${CloudFrontDistribution.DomainName}'"
+        gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token'"
+        gatewayresponse.header.Access-Control-Allow-Methods: "'GET,POST,PUT,DELETE,OPTIONS'"
+
+  # --- /findings ---------------------------------------------------------
   FindingsResource:
     Type: AWS::ApiGateway::Resource
     Properties:
@@ -411,8 +656,8 @@ Resources:
         IntegrationHttpMethod: POST
         Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations
 
-  # CORS preflight. API Gateway rejects OPTIONS on a resource that has no
-  # OPTIONS method, so each resource needs one explicitly.
+  # API Gateway rejects OPTIONS on a resource without an OPTIONS method, so each
+  # browser-facing resource has one. The Lambda answers the preflight.
   FindingsOptionsMethod:
     Type: AWS::ApiGateway::Method
     Properties:
@@ -425,8 +670,6 @@ Resources:
         IntegrationHttpMethod: POST
         Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations
 
-  # GET /findings/{finding_id} — a path part cannot contain a slash, so this has
-  # to be a nested resource rather than a PathPart like "{finding_id}".
   FindingByIdResource:
     Type: AWS::ApiGateway::Resource
     Properties:
@@ -458,6 +701,7 @@ Resources:
         IntegrationHttpMethod: POST
         Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations
 
+  # --- /approvals --------------------------------------------------------
   ApprovalsResource:
     Type: AWS::ApiGateway::Resource
     Properties:
@@ -487,10 +731,8 @@ Resources:
       Integration:
         Type: AWS_PROXY
         IntegrationHttpMethod: POST
-        Uri: !Sub arnaws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations
 
-  # /approvals/{approval_id}/vote — split across two resources because an API
-  # Gateway PathPart is a single segment and cannot contain a slash.
   ApprovalByIdResource:
     Type: AWS::ApiGateway::Resource
     Properties:
@@ -509,13 +751,13 @@ Resources:
     Type: AWS::ApiGateway::Method
     Properties:
       RestApiId: !Ref ApiGateway
-        ResourceId: !Ref ApprovalVoteResource
-        HttpMethod: POST
-        AuthorizationType: NONE
-        Integration:
-          Type: AWS_PROXY
-          IntegrationHttpMethod: POST
-          Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations
+      ResourceId: !Ref ApprovalVoteResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations
 
   ApprovalVoteOptionsMethod:
     Type: AWS::ApiGateway::Method
@@ -529,6 +771,7 @@ Resources:
         IntegrationHttpMethod: POST
         Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations
 
+  # --- /teardown ---------------------------------------------------------
   TeardownResource:
     Type: AWS::ApiGateway::Resource
     Properties:
@@ -560,6 +803,7 @@ Resources:
         IntegrationHttpMethod: POST
         Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations
 
+  # --- /config -----------------------------------------------------------
   ConfigResource:
     Type: AWS::ApiGateway::Resource
     Properties:
@@ -591,33 +835,199 @@ Resources:
         IntegrationHttpMethod: POST
         Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations
 
-  # API Lambda Function (handles all API routes)
-  ApiFunction:
-    Type: AWS::Lambda::Function
+  # --- /scan -------------------------------------------------------------
+  ScanResource:
+    Type: AWS::ApiGateway::Resource
     Properties:
-      FunctionName: !Sub cost-janitor-api-${Environment}
-      Runtime: python3.11
-      Handler: api.handler
-      Role: !GetAtt ApiRole.Arn
-      Timeout: 30
-      MemorySize: 256
-      Environment:
-        Variables:
-          FINDINGS_TABLE: !Ref FindingsTable
-          APPROVALS_TABLE: !Ref ApprovalsTable
-          CONFIG_TABLE: !Ref ConfigTable
-          TEARDOWN_FUNCTION: !Ref TeardownFunction
-          ENVIRONMENT: !Ref Environment
-          # The UI is served from CloudFront, so the browser origin differs from
-          # the API origin and CORS must name it explicitly.
-          ALLOWED_ORIGIN: !Sub https://${CloudFrontDistribution.DomainName}
-      Code:
-        ZipFile: |
-          # Placeholder - replaced by CI/CD
-          def handler(event, context):
-              return {"statusCode": 200, "body": "API not deployed yet"}
+      RestApiId: !Ref ApiGateway
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: scan
 
-  # Lambda Permissions for API Gateway
+  ScanMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref ScanResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations
+
+  ScanOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref ScanResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations
+
+  # --- /jobs/{job_id} ----------------------------------------------------
+  JobsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: jobs
+
+  JobByIdResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !Ref JobsResource
+      PathPart: "{job_id}"
+
+  JobByIdMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref JobByIdResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations
+
+  JobByIdOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref JobByIdResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations
+
+  # --- /activity ---------------------------------------------------------
+  ActivityResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: activity
+
+  ActivityMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref ActivityResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations
+
+  ActivityOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref ActivityResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations
+
+  # --- /mcp (agents only; API key required, no browser access) -----------
+  McpResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: mcp
+
+  McpMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref McpResource
+      HttpMethod: ANY
+      AuthorizationType: NONE
+      ApiKeyRequired: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${McpFunction.Arn}/invocations
+
+  # A deployment must be created after every method exists, or the first deploy fails with
+  # "The REST API doesn't contain any methods". CI also calls create-deployment on every push
+  # so route changes go live without renaming this resource.
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - FindingsMethod
+      - FindingsOptionsMethod
+      - FindingByIdMethod
+      - FindingByIdOptionsMethod
+      - ApprovalsMethod
+      - ApprovalsOptionsMethod
+      - ApprovalVoteMethod
+      - ApprovalVoteOptionsMethod
+      - TeardownMethod
+      - TeardownOptionsMethod
+      - ConfigMethod
+      - ConfigOptionsMethod
+      - ScanMethod
+      - ScanOptionsMethod
+      - JobByIdMethod
+      - JobByIdOptionsMethod
+      - ActivityMethod
+      - ActivityOptionsMethod
+      - McpMethod
+    Properties:
+      RestApiId: !Ref ApiGateway
+      Description: Initial deployment; CI redeploys the stage on every push
+
+  ApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref ApiGateway
+      DeploymentId: !Ref ApiDeployment
+      StageName: !Ref Environment
+      MethodSettings:
+        - ResourcePath: /*
+          HttpMethod: '*'
+          ThrottlingRateLimit: 20
+          ThrottlingBurstLimit: 40
+
+  McpApiKey:
+    Type: AWS::ApiGateway::ApiKey
+    Properties:
+      Name: !Sub cost-janitor-mcp-${Environment}
+      Description: Key for the TrueForge agent to call /mcp
+      Enabled: true
+
+  McpUsagePlan:
+    Type: AWS::ApiGateway::UsagePlan
+    Properties:
+      UsagePlanName: !Sub cost-janitor-mcp-${Environment}
+      ApiStages:
+        - ApiId: !Ref ApiGateway
+          Stage: !Ref ApiStage
+      Throttle:
+        RateLimit: 20
+        BurstLimit: 40
+      Quota:
+        Limit: 10000
+        Period: DAY
+
+  McpUsagePlanKey:
+    Type: AWS::ApiGateway::UsagePlanKey
+    Properties:
+      KeyId: !Ref McpApiKey
+      KeyType: API_KEY
+      UsagePlanId: !Ref McpUsagePlan
+
   ApiLambdaPermission:
     Type: AWS::Lambda::Permission
     Properties:
@@ -625,6 +1035,14 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: apigateway.amazonaws.com
       SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/*/*
+
+  McpLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref McpFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/*/mcp
 
   # ============================================================
   # EVENTBRIDGE RULE (Daily Scan)
@@ -660,9 +1078,10 @@ Resources:
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
-      WebsiteConfiguration:
-        IndexDocument: index.html
-        ErrorDocument: index.html
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
 
   FrontendBucketPolicy:
     Type: AWS::S3::BucketPolicy
@@ -706,6 +1125,7 @@ Resources:
             Cookies:
               Forward: none
         PriceClass: PriceClass_100
+        # Client-side routes (/approvals, /settings, ...) are not files in S3.
         CustomErrorResponses:
           - ErrorCode: 404
             ResponseCode: 200
@@ -716,17 +1136,39 @@ Resources:
 
 Outputs:
   ApiEndpoint:
-    Description: API Gateway endpoint
+    Description: API Gateway stage URL (REACT_APP_API_URL)
     Value: !Sub https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${Environment}
+  ApiId:
+    Description: REST API id
+    Value: !Ref ApiGateway
+  McpEndpoint:
+    Description: MCP server URL for the TrueForge agent (send the API key as x-api-key)
+    Value: !Sub https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/mcp
+  McpApiKeyId:
+    Description: Read the key value with aws apigateway get-api-key --api-key <id> --include-value
+    Value: !Ref McpApiKey
   FrontendUrl:
-    Description: CloudFront distribution URL
+    Description: Dashboard URL
     Value: !Sub https://${CloudFrontDistribution.DomainName}
+  FrontendBucketName:
+    Description: Dashboard bucket
+    Value: !Ref FrontendBucket
+  CloudFrontDistributionId:
+    Description: Distribution to invalidate after a frontend deploy
+    Value: !Ref CloudFrontDistribution
   FindingsTableName:
-    Description: DynamoDB findings table
     Value: !Ref FindingsTable
   ApprovalsTableName:
-    Description: DynamoDB approvals table
     Value: !Ref ApprovalsTable
   ConfigTableName:
-    Description: DynamoDB config table
     Value: !Ref ConfigTable
+  JobsTableName:
+    Value: !Ref JobsTable
+  ActivityTableName:
+    Value: !Ref ActivityTable
+  PromptRegistryTableName:
+    Value: !Ref PromptRegistryTable
+  ScannerFunctionName:
+    Value: !Ref ScannerFunction
+  TeardownFunctionName:
+    Value: !Ref TeardownFunction

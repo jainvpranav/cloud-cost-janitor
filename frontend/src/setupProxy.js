@@ -22,20 +22,24 @@ if (!target) {
   );
   module.exports = function () {};
 } else {
+  const paths = ['/findings', '/approvals', '/teardown', '/config', '/scan', '/jobs', '/activity'];
   // eslint-disable-next-line no-console
-  console.log(`[setupProxy] proxying /findings, /approvals, /teardown, /config -> ${target}`);
+  console.log(`[setupProxy] proxying ${paths.join(', ')} -> ${target}`);
+
+  // Mounted at the root with a filter: Express strips the mount path from req.url
+  // when a path is given to app.use, which would drop /findings etc. The API
+  // Gateway stage in the target (e.g. /prod) is prepended to each path.
+  // /approvals and /findings are also page routes: a browser navigation (Accept:
+  // text/html) must get the app, only XHR calls from axios go to the API.
+  const isApiCall = (pathname, req) =>
+    paths.some((p) => pathname === p || pathname.startsWith(`${p}/`)) &&
+    !(req.headers.accept || '').includes('text/html');
 
   module.exports = function (app) {
     app.use(
-      '/findings',
-      '/approvals',
-      '/teardown',
-      '/config',
-      createProxyMiddleware({
+      createProxyMiddleware(isApiCall, {
         target,
         changeOrigin: true,
-        // API Gateway stages are part of the path and must be preserved.
-        pathRewrite: (path) => path,
         logLevel: 'warn',
       })
     );

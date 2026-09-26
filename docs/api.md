@@ -106,7 +106,7 @@ List approval requests.
 **Query Parameters**:
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `status` | string | Filter by status (default: `PENDING`) |
+| `status` | string | `PENDING`, `APPROVED`, `REJECTED`, or `all` (default: all) |
 | `limit` | integer | Max results (default: 50) |
 | `last_key` | string | Pagination token |
 
@@ -146,9 +146,13 @@ Submit a vote on an approval request.
 ```json
 {
   "decision": "approve|reject",
-  "user": "user@company.com"
+  "user": "Alice"
 }
 ```
+
+`user` is required (the dashboard's "Approving as" name). Names are compared case-insensitively, so a
+second approval must come from a different name. When the approval becomes `APPROVED` or `REJECTED`,
+the finding's status is updated to match.
 
 **Response** (200):
 ```json
@@ -185,9 +189,12 @@ Trigger teardown for an approved finding.
 ```json
 {
   "message": "Teardown triggered",
-  "dry_run": true
+  "dry_run": true,
+  "job_id": "teardown-3f2a9c1b7d4e"
 }
 ```
+
+Poll `GET /jobs/{job_id}` for the result. A dry run is allowed while the approval is still `PENDING`.
 
 **Teardown Lambda Response** (via CloudWatch Logs):
 ```json
@@ -203,7 +210,7 @@ Trigger teardown for an approved finding.
 
 ### GET /config
 
-Get current configuration.
+Get current configuration. Guardrails are returned as a nested `guardrails` object.
 
 **Response** (200):
 ```json
@@ -228,7 +235,9 @@ Get current configuration.
 
 ### PUT /config
 
-Update configuration.
+Update configuration. Fields are merged into what is stored, so partial updates are safe. Guardrail
+fields (`dual_approval_threshold_usd`, `max_teardown_cost_usd`, ...) can be sent flat or inside
+`guardrails`; they are saved to the `guardrails` row. `scope_tags` limits scans to matching resources.
 
 **Request Body** (all fields optional):
 ```json
@@ -255,6 +264,67 @@ Update configuration.
   "message": "Config updated"
 }
 ```
+
+---
+
+### POST /scan
+
+Start a scan in the background (same as the daily EventBridge run).
+
+**Response** (202):
+```json
+{ "message": "Scan started", "job_id": "scan-8a1f0c2d3e4b" }
+```
+
+---
+
+### GET /jobs/{job_id}
+
+Status of a scan or teardown job.
+
+**Response** (200):
+```json
+{
+  "job_id": "scan-8a1f0c2d3e4b",
+  "kind": "scan",
+  "status": "SUCCEEDED",
+  "findings_count": 4,
+  "idle_resources": 4,
+  "monthly_waste_usd": 35.62,
+  "by_type": { "EBS": 2, "EC2": 1, "ELB": 1 }
+}
+```
+
+`status` is `QUEUED`, `RUNNING`, `SUCCEEDED`, `FAILED` or `REFUSED` (teardown guardrail or approval check).
+Teardown jobs carry `result` (`action`, or `simulated_actions` for a dry run) or `error` and `details`.
+
+---
+
+### GET /activity
+
+Latest agent tool calls and dashboard actions, newest first (today and yesterday).
+
+| Parameter | Type | Description |
+|---|---|---|
+| `limit` | integer | Max rows (default 50, max 100) |
+| `since` | string | Only rows with `ts` greater than this value |
+
+```json
+{
+  "items": [
+    { "ts": "2026-09-26T08:06:22.93+00:00#a1b2c3", "at": "2026-09-26T08:06:22.93+00:00",
+      "tool": "draft_teardown_plan", "actor": "agent", "ok": true,
+      "result_summary": "4 items sent for approval, 0 skipped, $35.62/mo" }
+  ]
+}
+```
+
+---
+
+### POST /mcp
+
+MCP endpoint for the TrueForge agent (streamable HTTP, stateless, JSON responses). Requires the
+`x-api-key` header; not browser-facing and has no CORS. Tools are listed in `agent/janitor-agent.md`.
 
 ---
 

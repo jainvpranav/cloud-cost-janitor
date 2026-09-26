@@ -16,7 +16,8 @@ import {
   SkeletonStats,
   StatTile,
 } from "../components/UI";
-import { useApprovals, CURRENT_USER } from "../hooks/useApi";
+import { useApprovals, useApprover, useConfig } from "../hooks/useApi";
+import { ApproverField, JobStatus } from "../components/Live";
 import { approvalsApi, teardownApi, toMessage } from "../api/client";
 import { money, num, relativeTime } from "../lib/format";
 
@@ -30,10 +31,15 @@ const SCOPES = [
 export const Approvals = () => {
   const navigate = useNavigate();
   const [scope, setScope] = useState("PENDING");
+  const [approver] = useApprover();
   const { approvals, loading, error, refetch, fetchedAt } = useApprovals({
-    status: scope === "ALL" ? undefined : scope,
+    status: scope === "ALL" ? "all" : scope,
     limit: 100,
+    pollMs: 3000,
   });
+  const [job, setJob] = useState(null);
+  const { data: config } = useConfig();
+  const dualThreshold = Number(config?.guardrails?.dual_approval_threshold_usd ?? 100);
 
   const [localError, setLocalError] = useState(null);
   const [notice, setNotice] = useState(null);
@@ -48,21 +54,27 @@ export const Approvals = () => {
       0,
     );
     const dual = pending.filter((a) => Number(a.required_approvals) > 1).length;
+    const me = approver.toLowerCase();
     const voted = pending.filter((a) =>
-      (a.votes || []).some((v) => v.user === CURRENT_USER),
+      (a.votes || []).some((v) => me && (v.user || "").toLowerCase() === me),
     ).length;
     const expiringSoon = pending.filter((a) => {
       const h = (new Date(a.expires_at) - Date.now()) / 3600000;
       return isFinite(h) && h > 0 && h < 48;
     }).length;
     return { totalValue, dual, voted, pending: pending.length, expiringSoon };
-  }, [approvals]);
+  }, [approvals, approver]);
 
   const vote = async (approvalId, decision) => {
+    if (!approver) {
+      setLocalError('Enter your name in "Approving as" first. Each approver needs their own name.');
+      document.getElementById("approvals-approver-name")?.focus();
+      return;
+    }
     setBusyId(approvalId);
     setLocalError(null);
     try {
-      await approvalsApi.vote(approvalId, decision, CURRENT_USER);
+      await approvalsApi.vote(approvalId, decision, approver);
       setNotice(
         decision === "approve"
           ? "Approval recorded. If quorum is met the request moves to Approved and teardown unlocks."
@@ -80,13 +92,9 @@ export const Approvals = () => {
     setBusyId(approvalId);
     setLocalError(null);
     try {
-      await teardownApi.trigger(approvalId, dryRun);
-      setNotice(
-        dryRun
-          ? "Dry run dispatched. Check the teardown Lambda logs for the deletion plan — nothing was removed."
-          : "Teardown dispatched. The guardrail checks run again inside the Lambda before anything is deleted.",
-      );
-      await refetch();
+      const res = await teardownApi.trigger(approvalId, dryRun);
+      setJob({ id: res.data?.job_id, approvalId, dryRun });
+      setNotice(null);
     } catch (e) {
       setLocalError(toMessage(e, "Could not trigger teardown"));
     } finally {
@@ -155,6 +163,15 @@ export const Approvals = () => {
           {notice}
         </Alert>
       ) : null}
+      {job?.id ? (
+        <Alert
+          variant={job.dryRun ? "info" : "warning"}
+          title={job.dryRun ? "Dry run" : "Teardown"}
+          onDismiss={() => setJob(null)}
+        >
+          <JobStatus jobId={job.id} onDone={() => refetch()} />
+        </Alert>
+      ) : null}
 
       <section className="section">
         <div className="stat-grid stagger">
@@ -181,7 +198,7 @@ export const Approvals = () => {
             tone={stats.dual > 0 ? "info" : "neutral"}
             hint={
               stats.dual > 0
-                ? "Anything above $100/mo"
+                ? `Anything above ${money(dualThreshold)}/mo`
                 : "Nothing crosses the dual-approval threshold"
             }
           />
@@ -205,9 +222,11 @@ export const Approvals = () => {
           style={{ marginBottom: "var(--s-7)" }}
         >
           <Segmented value={scope} onChange={setScope} options={SCOPES} />
-          <span className="t-sm t-muted">
-            {num(approvals.length)} request{approvals.length === 1 ? "" : "s"} ·
-            acting as <span className="mono">{CURRENT_USER}</span>
+          <span className="row row-5 row-wrap t-sm t-muted">
+            <span>
+              {num(approvals.length)} request{approvals.length === 1 ? "" : "s"}
+            </span>
+            <ApproverField id="approvals-approver-name" />
           </span>
         </div>
 
@@ -222,7 +241,7 @@ export const Approvals = () => {
               }
               description={
                 scope === "PENDING"
-                  ? "Every finding has been decided. New ones land here after the daily scan, or you can run one from the AWS console."
+                  ? "Every finding has been decided. New ones land here when the agent drafts a teardown plan."
                   : "Try a different status filter."
               }
             >
@@ -243,7 +262,7 @@ export const Approvals = () => {
                 key={a.approval_id}
                 approval={a}
                 finding={a.finding}
-                currentUser={CURRENT_USER}
+                currentUser={approver}
                 onVote={vote}
                 onTeardown={(id, dryRun) =>
                   dryRun ? teardown(id, true) : setConfirm(a)

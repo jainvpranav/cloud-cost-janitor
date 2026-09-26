@@ -9,7 +9,7 @@ import { Insights } from './pages/Insights';
 import { Docs } from './pages/Docs';
 import { Settings } from './pages/Settings';
 import { NotFound } from './pages/NotFound';
-import { useApprovals } from './hooks/useApi';
+import { useApprovals, useConfig } from './hooks/useApi';
 
 function Shell() {
   const location = useLocation();
@@ -18,7 +18,8 @@ function Shell() {
 
   // The approval count drives the sidebar badge and topbar bell, so it is
   // fetched once at the shell level and shared by every page.
-  const { approvals } = useApprovals({ status: 'PENDING', limit: 200 });
+  const { approvals } = useApprovals({ status: 'PENDING', limit: 200, pollMs: 5000 });
+  const { data: config } = useConfig();
   const pendingCount = approvals.filter((a) => a.status === 'PENDING').length;
 
   // Lightweight pending count for the sidebar's "Insights" badge.
@@ -55,6 +56,7 @@ function Shell() {
           onMenu={() => setDrawerOpen(true)}
           pendingApprovals={pendingCount}
           onNavigate={() => setDrawerOpen(false)}
+          config={config}
         />
         <main className="grow">
           <ErrorBoundary key={location.pathname}>

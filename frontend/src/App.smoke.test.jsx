@@ -24,7 +24,11 @@ jest.mock('./api/client', () => {
     toMessage: (e) => (e && e.message) || 'error',
     findingsApi: { list: noop, get: noop },
     approvalsApi: { list: noop, vote: noop, teardown: noop },
+    teardownApi: { trigger: noop },
     configApi: { get: noop, put: noop },
+    scanApi: { start: noop },
+    jobsApi: { get: noop },
+    activityApi: { list: noop },
   };
 });
 

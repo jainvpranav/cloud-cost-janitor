@@ -5,6 +5,8 @@ import { Icon } from './Icons';
 import { useTheme } from '../theme/ThemeProvider';
 import { initials, relativeTime } from '../lib/format';
 import { Button } from './UI';
+import { ApproverField, DemoModeChip } from './Live';
+import { useApprover } from '../hooks/useApi';
 
 /* ==========================================================================
    Sidebar
@@ -29,6 +31,8 @@ function NavItem({ to, label, icon, count, alert, end, onNavigate }) {
 }
 
 export function Sidebar({ pendingApprovals = 0, openCount = 0, rail, onNavigate }) {
+  const [approver] = useApprover();
+  const who = approver || 'No name set';
   return (
     <aside className="sidebar">
       <div className="sidebar-brand">
@@ -69,11 +73,11 @@ export function Sidebar({ pendingApprovals = 0, openCount = 0, rail, onNavigate 
       </nav>
 
       <div className="sidebar-footer">
-        <div className="sidebar-user" title="current-user">
-          <span className="avatar">{initials('current-user')}</span>
+        <div className="sidebar-user" title={`Approving as ${who}`}>
+          <span className="avatar">{approver ? initials(approver) : '?'}</span>
           <span className="sidebar-user-meta">
-            <strong>current-user</strong>
-            <span>Platform Engineering</span>
+            <strong>{who}</strong>
+            <span>Approver</span>
           </span>
         </div>
       </div>
@@ -94,7 +98,7 @@ const CRUMBS = {
   '/settings': { crumb: 'Reference', title: 'Settings' },
 };
 
-export function Topbar({ onMenu, pendingApprovals, onNavigate }) {
+export function Topbar({ onMenu, pendingApprovals, onNavigate, config }) {
   const { pathname } = useLocation();
   const { theme, mode, setTheme, toggle } = useTheme();
   const meta = CRUMBS[pathname] || { crumb: 'Cloud Cost Janitor', title: 'Not found' };
@@ -117,6 +121,10 @@ export function Topbar({ onMenu, pendingApprovals, onNavigate }) {
       </div>
 
       <div className="topbar-actions">
+        <DemoModeChip config={config} />
+        <span className="crumb-hide">
+          <ApproverField />
+        </span>
         <NavLink
           to="/approvals"
           onClick={onNavigate}

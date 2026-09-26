@@ -190,7 +190,7 @@ export function DonutChart({
             <span className="t-truncate grow">{d.label}</span>
             <span className="lv">{valueFormat(d.value)}</span>
             <span className="t-xs t-muted tnum" style={{ width: 34, textAlign: 'right' }}>
-              {pct((d.value / total) * 100, 0)}
+              {pct(d.value / total, 0)}
             </span>
           </div>
         ))}

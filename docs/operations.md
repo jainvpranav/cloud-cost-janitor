@@ -1,5 +1,56 @@
 # Operations Guide
 
+## Demo runbook
+
+The demo stack plants six tagged resources in the default VPC. Four are waste; two are there to show the janitor leaving things alone.
+
+| Resource | Setup | Expected | Shown /mo |
+|---|---|---|---|
+| `demo-forgotten-dev-box` | t3.micro, no workload | Flagged | $7.59 |
+| `demo-busy-api` | t3.micro, busy loop (~50% CPU) | Not flagged | – |
+| `demo-orphan-data` | gp3 20 GiB, unattached | Flagged | $1.60 |
+| `demo-old-backup-disk` | gp2 100 GiB, unattached | Flagged | $10.00 |
+| `demo-prod-db-disk` | gp3 5 GiB, `Environment=prod` | Protected | – |
+| `demo-legacy-alb` | internal ALB, no targets | Flagged, **2 approvers** | $16.43 |
+| **Total** | | **4 findings** | **$35.62** ($427.44/yr) |
+
+Running cost is about $0.062/hour (no public IPs, internal ALB, standard T3 credits). The stack deletes itself after `DEMO_TTL_HOURS` (default 8).
+
+### Timeline
+
+| When | Action |
+|---|---|
+| T−2h | Platform deployed; dashboard loads; TrueForge agent points at `McpEndpoint` with the API key |
+| T−90m | Actions → Demo resources → `create` (CPU metrics need about an hour) |
+| T−30m | `python scripts/demo_profile.py apply --api <ApiEndpoint>`; full rehearsal |
+| T−10m | Recreate what the rehearsal deleted (`delete`, then `create`, then wait), or rehearse on a second run earlier; `python scripts/demo_reset.py --yes` |
+| Demo | Ask the agent to find waste → it scans, assesses, drafts a plan and stops → approve in the dashboard (two names for the ALB) → tell the agent to continue → findings flip to Reclaimed |
+| After | Demo resources → `delete`; `python scripts/demo_cleanup.py --delete`; `python scripts/demo_profile.py restore --api <ApiEndpoint>` |
+
+The demo profile sets a 1-hour CPU window, 50 MB network threshold, 0-day volume and load balancer age, `scope_tags={"CostJanitor": ["demo"]}` (only demo resources are scanned), and a $10 dual-approval threshold so the ALB needs two approvers.
+
+### If something goes wrong on stage
+
+| Symptom | Fix |
+|---|---|
+| Scan finds nothing | Check the demo profile is applied (`demo_profile.py show`) and the demo stack is at least an hour old |
+| Busy box is flagged | It had no CPU data yet; wait and rescan |
+| Agent improvises | Use the dashboard: **Run scan**, then Approvals → Dry run / Execute teardown; or call the MCP tools with MCP Inspector |
+| Vote rejected "already voted" | Each approver needs a different name in **Approving as** |
+| Teardown refused "no longer idle" | Working as intended: the resource changed since the scan |
+
+### Rehearse without AWS
+
+`scripts/local_stack.py` runs the API, MCP server, scanner and teardown against a simulated account with the same six resources:
+
+```bash
+.venv/bin/python scripts/local_stack.py          # API + MCP on http://127.0.0.1:8787/prod
+cd frontend && REACT_APP_API_URL=http://127.0.0.1:8787/prod npm start
+```
+
+Point a local TrueForge agent at `http://127.0.0.1:8787/prod/mcp`. State resets when the script restarts.
+
+
 ## Daily Operations
 
 ### Morning Checklist (Automated)

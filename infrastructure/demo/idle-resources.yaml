@@ -1,0 +1,186 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Cost Janitor demo waste. Created only on request by the demo-resources workflow and deleted
+  automatically after DEMO_TTL_HOURS. Runs at about $0.062/hour; the janitor should report $35.62/month.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  SubnetA:
+    Type: AWS::EC2::Subnet::Id
+    Description: Subnet in one Availability Zone
+  SubnetB:
+    Type: AWS::EC2::Subnet::Id
+    Description: Subnet in a different Availability Zone (the ALB needs two)
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+  ExpiresAt:
+    Type: String
+    Description: ISO-8601 UTC time after which the scheduled workflow deletes this stack
+
+Resources:
+  # No inbound rules: nothing needs to reach these resources.
+  DemoSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Cost Janitor demo - no inbound access
+      VpcId: !Ref VpcId
+      Tags:
+        - {Key: Name, Value: janitor-demo}
+        - {Key: CostJanitor, Value: demo}
+        - {Key: Project, Value: janitor-demo}
+        - {Key: ExpiresAt, Value: !Ref ExpiresAt}
+
+  # Standard credits: a busy t3 throttles to baseline instead of billing surplus CPU.
+  DemoLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub janitor-demo-${AWS::StackName}
+      LaunchTemplateData:
+        ImageId: !Ref AmiId
+        InstanceType: t3.micro
+        CreditSpecification:
+          CpuCredits: standard
+        MetadataOptions:
+          HttpTokens: required
+          HttpEndpoint: enabled
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: 8
+              VolumeType: gp3
+              DeleteOnTermination: true
+              Encrypted: true
+        TagSpecifications:
+          - ResourceType: volume
+            Tags:
+              - {Key: CostJanitor, Value: demo}
+              - {Key: Project, Value: janitor-demo}
+              - {Key: ExpiresAt, Value: !Ref ExpiresAt}
+
+  ForgottenDevBox:
+    Type: AWS::EC2::Instance
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref DemoLaunchTemplate
+        Version: !GetAtt DemoLaunchTemplate.LatestVersionNumber
+      NetworkInterfaces:
+        - DeviceIndex: '0'
+          SubnetId: !Ref SubnetA
+          AssociatePublicIpAddress: false
+          GroupSet: [!Ref DemoSecurityGroup]
+      Tags:
+        - {Key: Name, Value: demo-forgotten-dev-box}
+        - {Key: CostJanitor, Value: demo}
+        - {Key: Project, Value: janitor-demo}
+        - {Key: ExpiresAt, Value: !Ref ExpiresAt}
+
+  BusyApi:
+    Type: AWS::EC2::Instance
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref DemoLaunchTemplate
+        Version: !GetAtt DemoLaunchTemplate.LatestVersionNumber
+      NetworkInterfaces:
+        - DeviceIndex: '0'
+          SubnetId: !Ref SubnetA
+          AssociatePublicIpAddress: false
+          GroupSet: [!Ref DemoSecurityGroup]
+      # One busy-loop process keeps one of two vCPUs at 100% (about 50% CPUUtilization).
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          nohup sh -c 'while :; do :; done' >/dev/null 2>&1 &
+      Tags:
+        - {Key: Name, Value: demo-busy-api}
+        - {Key: CostJanitor, Value: demo}
+        - {Key: Project, Value: janitor-demo}
+        - {Key: ExpiresAt, Value: !Ref ExpiresAt}
+
+  OrphanDataVolume:
+    Type: AWS::EC2::Volume
+    Properties:
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Size: 20
+      VolumeType: gp3
+      Encrypted: true
+      Tags:
+        - {Key: Name, Value: demo-orphan-data}
+        - {Key: CostJanitor, Value: demo}
+        - {Key: Project, Value: janitor-demo}
+        - {Key: ExpiresAt, Value: !Ref ExpiresAt}
+
+  OldBackupDisk:
+    Type: AWS::EC2::Volume
+    Properties:
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Size: 100
+      VolumeType: gp2
+      Encrypted: true
+      Tags:
+        - {Key: Name, Value: demo-old-backup-disk}
+        - {Key: CostJanitor, Value: demo}
+        - {Key: Project, Value: janitor-demo}
+        - {Key: ExpiresAt, Value: !Ref ExpiresAt}
+
+  # Unattached like the others, but tagged prod: the janitor must leave it alone.
+  ProdDbDisk:
+    Type: AWS::EC2::Volume
+    Properties:
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Size: 5
+      VolumeType: gp3
+      Encrypted: true
+      Tags:
+        - {Key: Name, Value: demo-prod-db-disk}
+        - {Key: Environment, Value: prod}
+        - {Key: CostJanitor, Value: demo}
+        - {Key: Project, Value: janitor-demo}
+        - {Key: ExpiresAt, Value: !Ref ExpiresAt}
+
+  # Internal scheme: no public IPv4 addresses to pay for.
+  LegacyAlb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: demo-legacy-alb
+      Type: application
+      Scheme: internal
+      Subnets: [!Ref SubnetA, !Ref SubnetB]
+      SecurityGroups: [!Ref DemoSecurityGroup]
+      Tags:
+        - {Key: Name, Value: demo-legacy-alb}
+        - {Key: CostJanitor, Value: demo}
+        - {Key: Project, Value: janitor-demo}
+        - {Key: ExpiresAt, Value: !Ref ExpiresAt}
+
+  LegacyTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: demo-legacy-tg
+      VpcId: !Ref VpcId
+      Protocol: HTTP
+      Port: 80
+      TargetType: instance
+      Tags:
+        - {Key: CostJanitor, Value: demo}
+        - {Key: Project, Value: janitor-demo}
+
+Outputs:
+  ExpectedFindings:
+    Description: What a scan with the demo profile should report
+    Value: '4 findings, $35.62/mo: dev box $7.59, orphan 20 GiB gp3 $1.60, backup 100 GiB gp2 $10.00, ALB $16.43 (2 approvers). Not flagged: busy API, prod disk.'
+  ForgottenDevBoxId:
+    Value: !Ref ForgottenDevBox
+  BusyApiId:
+    Value: !Ref BusyApi
+  OrphanDataVolumeId:
+    Value: !Ref OrphanDataVolume
+  OldBackupDiskId:
+    Value: !Ref OldBackupDisk
+  ProdDbDiskId:
+    Value: !Ref ProdDbDisk
+  LegacyAlbArn:
+    Value: !Ref LegacyAlb
+  ExpiresAt:
+    Value: !Ref ExpiresAt

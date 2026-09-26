@@ -13,16 +13,22 @@ export const STATUS = {
   PENDING_APPROVAL: 'PENDING_APPROVAL',
   APPROVED: 'APPROVED',
   REJECTED: 'REJECTED',
+  TEARDOWN_IN_PROGRESS: 'TEARDOWN_IN_PROGRESS',
   TEARDOWN_COMPLETE: 'TEARDOWN_COMPLETE',
+  SKIPPED_NOW_ACTIVE: 'SKIPPED_NOW_ACTIVE',
+  RESOURCE_GONE: 'RESOURCE_GONE',
   EXPIRED: 'EXPIRED',
 };
 
 export const STATUS_META = {
-  PENDING_ENRICHMENT: { label: 'Enriching', tone: 'ai', step: 1 },
+  PENDING_ENRICHMENT: { label: 'Detected', tone: 'ai', step: 1 },
   PENDING_APPROVAL: { label: 'Awaiting review', tone: 'warn', step: 2 },
   APPROVED: { label: 'Approved', tone: 'brand', step: 3 },
   REJECTED: { label: 'Rejected', tone: 'danger', step: 4 },
+  TEARDOWN_IN_PROGRESS: { label: 'Deleting', tone: 'info', step: 4 },
   TEARDOWN_COMPLETE: { label: 'Reclaimed', tone: 'success', step: 5 },
+  SKIPPED_NOW_ACTIVE: { label: 'Back in use', tone: 'neutral', step: 4 },
+  RESOURCE_GONE: { label: 'Already gone', tone: 'neutral', step: 4 },
   EXPIRED: { label: 'Expired', tone: 'neutral', step: 4 },
 };
 
@@ -46,9 +52,9 @@ export const LIFECYCLE = [
   'TEARDOWN_COMPLETE',
 ];
 
-const REALIZED = [STATUS.APPROVED, STATUS.TEARDOWN_COMPLETE];
+const REALIZED = [STATUS.APPROVED, STATUS.TEARDOWN_IN_PROGRESS, STATUS.TEARDOWN_COMPLETE];
 const IN_FLIGHT = [STATUS.PENDING_ENRICHMENT, STATUS.PENDING_APPROVAL];
-const CLOSED = [...REALIZED, STATUS.REJECTED];
+const CLOSED = [...REALIZED, STATUS.REJECTED, STATUS.SKIPPED_NOW_ACTIVE, STATUS.RESOURCE_GONE];
 
 const cost = (f) => Number(f?.monthly_cost_usd) || 0;
 const ann = (m) => (Number(m) || 0) * 12;

@@ -1,6 +1,9 @@
 from typing import Dict, List, Any, Optional
-from dataclasses import dataclass
-from datetime import datetime, timedelta
+from dataclasses import dataclass, field
+from datetime import datetime
+from decimal import Decimal, ROUND_HALF_UP
+
+HOURS_PER_MONTH = 730
 
 
 @dataclass
@@ -12,6 +15,9 @@ class ScanConfig:
     ebs_no_snapshot_days: int = 30
     lb_idle_days: int = 7
     excluded_tags: Dict[str, List[str]] = None
+    scope_tags: Dict[str, List[str]] = field(default_factory=dict)
+    role_arn: Optional[str] = None
+    account_id: str = "unknown"
 
     def __post_init__(self):
         if self.excluded_tags is None:
@@ -19,6 +25,12 @@ class ScanConfig:
                 "Environment": ["prod", "production"],
                 "CostJanitor": ["ignore", "do-not-delete"],
             }
+        self.scope_tags = self.scope_tags or {}
+        self.role_arn = self.role_arn or None
+
+
+def tags_to_dict(tags: Optional[List[Dict]]) -> Dict[str, str]:
+    return {t["Key"]: t["Value"] for t in (tags or [])}
 
 
 def is_excluded(resource_tags: Dict[str, str], config: ScanConfig) -> bool:
@@ -28,18 +40,38 @@ def is_excluded(resource_tags: Dict[str, str], config: ScanConfig) -> bool:
     return False
 
 
+def in_scope(resource_tags: Dict[str, str], config: ScanConfig) -> bool:
+    for key, values in config.scope_tags.items():
+        if resource_tags.get(key) not in values:
+            return False
+    return True
+
+
+def metric_period(hours: int) -> int:
+    return 300 if hours <= 3 else 3600
+
+
+def min_datapoints(hours: int) -> int:
+    expected = hours * 3600 // metric_period(hours)
+    return max(1, expected // 2)
+
+
 def evaluate_ec2(instance: Dict, metrics: Dict, asg_instance_ids: set, config: ScanConfig) -> Optional[Dict]:
     instance_id = instance["InstanceId"]
     state = instance["State"]["Name"]
-    tags = {t["Key"]: t["Value"] for t in instance.get("Tags", [])}
+    tags = tags_to_dict(instance.get("Tags"))
 
-    if is_excluded(tags, config):
+    if is_excluded(tags, config) or not in_scope(tags, config):
         return None
 
     if instance_id in asg_instance_ids:
         return None
 
     if state != "running":
+        return None
+
+    # No CloudWatch data means we don't know, not that the box is idle.
+    if metrics.get("datapoints", 0) < min_datapoints(config.cpu_hours):
         return None
 
     cpu_avg = metrics.get("cpu_avg", 0)
@@ -55,12 +87,15 @@ def evaluate_ec2(instance: Dict, metrics: Dict, asg_instance_ids: set, config: S
                 "cpu_avg_24h": round(cpu_avg, 2),
                 "cpu_max_24h": round(metrics.get("cpu_max", 0), 2),
                 "network_in_bytes_24h": network_in,
+                "window_hours": config.cpu_hours,
+                "datapoints": metrics.get("datapoints", 0),
                 "instance_type": instance["InstanceType"],
                 "state": state,
                 "launch_time": instance["LaunchTime"].isoformat() if isinstance(instance.get("LaunchTime"), datetime) else instance.get("LaunchTime"),
             },
             "tags": tags,
             "monthly_cost_usd": estimate_ec2_cost(instance["InstanceType"], region),
+            "price_source": "table" if instance["InstanceType"] in EC2_HOURLY else "default",
         }
     return None
 
@@ -68,9 +103,9 @@ def evaluate_ec2(instance: Dict, metrics: Dict, asg_instance_ids: set, config: S
 def evaluate_ebs(volume: Dict, snapshots: List[Dict], config: ScanConfig) -> Optional[Dict]:
     volume_id = volume["VolumeId"]
     state = volume["State"]
-    tags = {t["Key"]: t["Value"] for t in volume.get("Tags", [])}
+    tags = tags_to_dict(volume.get("Tags"))
 
-    if is_excluded(tags, config):
+    if is_excluded(tags, config) or not in_scope(tags, config):
         return None
 
     if state != "available":
@@ -115,6 +150,7 @@ def evaluate_ebs(volume: Dict, snapshots: List[Dict], config: ScanConfig) -> Opt
         },
         "tags": tags,
         "monthly_cost_usd": monthly_cost,
+        "price_source": "table",
     }
 
 
@@ -122,9 +158,9 @@ def evaluate_lb(lb: Dict, target_groups: List[Dict], target_health_map: Dict, me
     lb_arn = lb["LoadBalancerArn"]
     lb_name = lb["LoadBalancerName"]
     lb_type = lb["Type"]
-    tags = {t["Key"]: t["Value"] for t in lb.get("Tags", [])}
+    tags = tags_to_dict(lb.get("Tags"))
 
-    if is_excluded(tags, config):
+    if is_excluded(tags, config) or not in_scope(tags, config):
         return None
 
     has_healthy_targets = False
@@ -170,48 +206,64 @@ def evaluate_lb(lb: Dict, target_groups: List[Dict], target_health_map: Dict, me
         },
         "tags": tags,
         "monthly_cost_usd": monthly_cost,
+        "price_source": "table",
     }
+
+
+# us-east-1 on-demand list prices.
+EBS_PER_GB_MONTH = {
+    "gp2": 0.10,
+    "gp3": 0.08,
+    "io1": 0.125,
+    "io2": 0.125,
+    "st1": 0.045,
+    "sc1": 0.015,
+    "standard": 0.05,
+}
+
+LB_HOURLY = {
+    "application": 0.0225,
+    "network": 0.0225,
+    "gateway": 0.0125,
+}
+CLASSIC_ELB_HOURLY = 0.025
+
+EC2_HOURLY = {
+    "t3.micro": 0.0104,
+    "t3.small": 0.0208,
+    "t3.medium": 0.0416,
+    "t3.large": 0.0832,
+    "t3.xlarge": 0.1664,
+    "t3.2xlarge": 0.3328,
+    "m5.large": 0.096,
+    "m5.xlarge": 0.192,
+    "m5.2xlarge": 0.384,
+    "m5.4xlarge": 0.768,
+    "c5.large": 0.085,
+    "c5.xlarge": 0.17,
+    "c5.2xlarge": 0.34,
+    "r5.large": 0.126,
+    "r5.xlarge": 0.252,
+}
+UNKNOWN_EC2_MONTHLY = 50.0
+
+
+def money(value: float) -> float:
+    return float(Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+
+def monthly(hourly: float) -> float:
+    return money(Decimal(str(hourly)) * HOURS_PER_MONTH)
 
 
 def estimate_ebs_cost(volume_type: str, size_gb: int) -> float:
-    prices_per_gb_month = {
-        "gp2": 0.10,
-        "gp3": 0.08,
-        "io1": 0.125,
-        "io2": 0.125,
-        "st1": 0.045,
-        "sc1": 0.025,
-        "standard": 0.05,
-    }
-    return prices_per_gb_month.get(volume_type, 0.10) * size_gb
+    return money(Decimal(str(EBS_PER_GB_MONTH.get(volume_type, 0.10))) * int(size_gb))
 
 
 def estimate_lb_cost(lb_type: str) -> float:
-    if lb_type == "application":
-        return 16.43
-    elif lb_type == "network":
-        return 16.43
-    elif lb_type == "gateway":
-        return 16.43
-    return 18.00
+    return monthly(LB_HOURLY.get(lb_type, CLASSIC_ELB_HOURLY))
 
 
 def estimate_ec2_cost(instance_type: str, region: str = "us-east-1") -> float:
-    pricing = {
-        "t3.micro": 7.59,
-        "t3.small": 15.18,
-        "t3.medium": 30.37,
-        "t3.large": 60.74,
-        "t3.xlarge": 121.47,
-        "t3.2xlarge": 242.94,
-        "m5.large": 69.12,
-        "m5.xlarge": 138.24,
-        "m5.2xlarge": 276.48,
-        "m5.4xlarge": 552.96,
-        "c5.large": 61.32,
-        "c5.xlarge": 122.64,
-        "c5.2xlarge": 245.28,
-        "r5.large": 90.72,
-        "r5.xlarge": 181.44,
-    }
-    return pricing.get(instance_type, 50.0)
+    hourly = EC2_HOURLY.get(instance_type)
+    return monthly(hourly) if hourly is not None else UNKNOWN_EC2_MONTHLY

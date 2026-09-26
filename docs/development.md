@@ -1,5 +1,57 @@
 # Development Guide
 
+## Quick path: everything local, no AWS
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r backend/requirements-dev.txt
+
+.venv/bin/python -m pytest backend/tests -q        # 45 tests: rules, scanner, teardown, API/CORS, MCP
+.venv/bin/python scripts/local_stack.py            # API + MCP on http://127.0.0.1:8787/prod
+```
+
+`local_stack.py` runs the real Lambda handlers against a simulated account (moto) seeded with the
+six demo resources and CloudWatch CPU data. "Run scan" in the dashboard finds the same four items as
+the real demo. Scans and teardowns run in background threads, like async Lambda invokes.
+
+Dashboard against it:
+
+```bash
+cd frontend
+echo "REACT_APP_API_URL=http://127.0.0.1:8787/prod" > .env.local
+npm start
+```
+
+## MCP server
+
+`backend/mcp_server/` is one codebase for both targets:
+
+| Where | Entry point | How |
+|---|---|---|
+| Lambda | `lambda_function.handler` | Mangum; a fresh ASGI app per invocation because the SDK's session manager can only start once |
+| Local, real AWS tables | `local.py` | `cd backend && ../.venv/bin/python mcp_server/local.py --port 8000` after exporting the table and function names from the stack outputs |
+| Local, simulated AWS | `scripts/local_stack.py` | `/prod/mcp` on port 8787 |
+
+Environment for `local.py` (values from `aws cloudformation describe-stacks --stack-name cost-janitor-prod`):
+
+```bash
+export FINDINGS_TABLE=cost-janitor-findings-prod APPROVALS_TABLE=cost-janitor-approvals-prod \
+       CONFIG_TABLE=cost-janitor-config-prod JOBS_TABLE=cost-janitor-jobs-prod \
+       ACTIVITY_TABLE=cost-janitor-activity-prod \
+       SCANNER_FUNCTION=cost-janitor-scanner-prod TEARDOWN_FUNCTION=cost-janitor-teardown-prod
+```
+
+The folder is `mcp_server`, not `mcp`, because a local `mcp/` directory would shadow the MCP SDK
+package in tests. It uses SDK 2.x (`mcp.server.mcpserver.MCPServer`, the renamed FastMCP).
+
+## Lambda packaging
+
+`./scripts/package_lambdas.sh` builds `dist/{scanner,enrichment,teardown,api,mcp}.zip` exactly as CI
+does. Every zip gets `backend/common/`; teardown also gets the scanner's `aws_client.py` and
+`rules.py`. Dependencies are installed as manylinux wheels for Python 3.11; boto3 comes from the
+Lambda runtime.
+
+
 ## Local Development Setup
 
 ### Prerequisites

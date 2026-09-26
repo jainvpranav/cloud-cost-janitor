@@ -8,6 +8,7 @@ import boto3
 from botocore.config import Config
 from openai import OpenAI
 
+from common.ddb import to_ddb
 from prompts import get_prompt, render_prompt
 
 dynamodb = boto3.resource("dynamodb", config=Config(retries={"max_attempts": 3}))
@@ -17,7 +18,7 @@ FINDINGS_TABLE = os.environ["FINDINGS_TABLE"]
 APPROVALS_TABLE = os.environ["APPROVALS_TABLE"]
 PROMPT_REGISTRY_TABLE = os.environ["PROMPT_REGISTRY_TABLE"]
 APPROVAL_TOPIC_ARN = os.environ["APPROVAL_TOPIC_ARN"]
-OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 ENVIRONMENT = os.environ["ENVIRONMENT"]
 
 # The v1.x SDK requires a client instance; `openai.api_key = ...` is the removed v0.x form.
@@ -94,12 +95,12 @@ def get_prompt_version(model_name: str, version: str) -> Dict[str, Any]:
 
 def save_finding(finding: Dict[str, Any]):
     table = dynamodb.Table(FINDINGS_TABLE)
-    table.put_item(Item=finding)
+    table.put_item(Item=to_ddb(finding))
 
 
 def create_approval(finding: Dict[str, Any]) -> str:
     approval_id = f"appr-{finding['finding_id']}"
-    monthly_cost = finding.get("monthly_cost_usd", 0)
+    monthly_cost = float(finding.get("monthly_cost_usd", 0))
     required_approvals = 2 if monthly_cost > 100 else 1
 
     approval = {
@@ -114,7 +115,7 @@ def create_approval(finding: Dict[str, Any]) -> str:
     }
 
     table = dynamodb.Table(APPROVALS_TABLE)
-    table.put_item(Item=approval)
+    table.put_item(Item=to_ddb(approval))
     return approval_id
 
 

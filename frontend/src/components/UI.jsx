@@ -145,11 +145,14 @@ export function Chip({ k, v, children, className = '' }) {
 /** Status badge driven by the shared STATUS_META map. */
 export function StatusBadge({ status, size, dot = true }) {
   const meta = {
-    PENDING_ENRICHMENT: { tone: 'ai', label: 'Enriching' },
+    PENDING_ENRICHMENT: { tone: 'ai', label: 'Detected' },
     PENDING_APPROVAL: { tone: 'warn', label: 'Awaiting review' },
     APPROVED: { tone: 'brand', label: 'Approved' },
     REJECTED: { tone: 'danger', label: 'Rejected' },
+    TEARDOWN_IN_PROGRESS: { tone: 'info', label: 'Deleting' },
     TEARDOWN_COMPLETE: { tone: 'success', label: 'Reclaimed' },
+    SKIPPED_NOW_ACTIVE: { tone: 'neutral', label: 'Back in use' },
+    RESOURCE_GONE: { tone: 'neutral', label: 'Already gone' },
     EXPIRED: { tone: 'neutral', label: 'Expired' },
   }[status] || { tone: 'neutral', label: status || 'Unknown' };
   return (
@@ -372,7 +375,7 @@ export function ConfidenceMeter({ value }) {
   const tone = v === null ? 'neutral' : v >= 0.8 ? 'success' : v >= 0.6 ? 'info' : v >= 0.4 ? 'warn' : 'danger';
   return (
     <div className="confidence-meter">
-      <Meter value={v || 0} tone={tone} size="sm" />
+      <Meter value={(v || 0) * 100} tone={tone} size="sm" />
       <span className="val">{v === null ? '—' : `${Math.round(v * 100)}%`}</span>
     </div>
   );

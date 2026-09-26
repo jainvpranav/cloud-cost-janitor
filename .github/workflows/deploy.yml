@@ -1,0 +1,194 @@
+name: Deploy
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  STACK_NAME: cost-janitor-prod
+  ENVIRONMENT: prod
+
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  backend:
+    name: Deploy backend
+    needs: test
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check configuration
+        env:
+          ROLE: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          EMAIL: ${{ secrets.NOTIFICATION_EMAIL }}
+          ARTIFACTS: ${{ vars.ARTIFACTS_BUCKET }}
+          FRONTEND: ${{ vars.FRONTEND_BUCKET_NAME }}
+        run: |
+          missing=""
+          [ -n "$ROLE" ] || missing="$missing secret:AWS_DEPLOY_ROLE_ARN"
+          [ -n "$EMAIL" ] || missing="$missing secret:NOTIFICATION_EMAIL"
+          [ -n "$ARTIFACTS" ] || missing="$missing variable:ARTIFACTS_BUCKET"
+          [ -n "$FRONTEND" ] || missing="$missing variable:FRONTEND_BUCKET_NAME"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing GitHub configuration:$missing. See docs/deployment.md."
+            exit 1
+          fi
+          case "$FRONTEND" in cost-janitor-*) ;; *)
+            echo "::error::FRONTEND_BUCKET_NAME must start with cost-janitor- (the deploy role is scoped to that prefix)."
+            exit 1;;
+          esac
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Package Lambdas
+        run: ./scripts/package_lambdas.sh
+
+      - name: Upload artifacts
+        env:
+          BUCKET: ${{ vars.ARTIFACTS_BUCKET }}
+        run: |
+          for zip in dist/*.zip; do
+            name="$(basename "$zip" .zip)"
+            aws s3 cp "$zip" "s3://$BUCKET/cost-janitor/$name-$GITHUB_SHA.zip" --only-show-errors
+          done
+
+      - name: Clear a failed first deploy
+        run: |
+          status="$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo NONE)"
+          echo "Stack status: $status"
+          if [ "$status" = "ROLLBACK_COMPLETE" ]; then
+            aws cloudformation delete-stack --stack-name "$STACK_NAME"
+            aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME"
+          fi
+
+      - name: Deploy stack
+        env:
+          NOTIFICATION_EMAIL: ${{ secrets.NOTIFICATION_EMAIL }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          FRONTEND_BUCKET_NAME: ${{ vars.FRONTEND_BUCKET_NAME }}
+          ENRICHMENT_ENABLED: ${{ vars.ENRICHMENT_ENABLED || 'false' }}
+          TEARDOWN_SCOPE_TAG_VALUE: ${{ vars.TEARDOWN_SCOPE_TAG_VALUE || 'demo' }}
+        run: |
+          aws cloudformation deploy \
+            --stack-name "$STACK_NAME" \
+            --template-file infrastructure/template.yaml \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset \
+            --tags Project=cost-janitor \
+            --parameter-overrides \
+              "Environment=$ENVIRONMENT" \
+              "FrontendBucketName=$FRONTEND_BUCKET_NAME" \
+              "NotificationEmail=$NOTIFICATION_EMAIL" \
+              "OpenAIApiKey=$OPENAI_API_KEY" \
+              "EnrichmentEnabled=$ENRICHMENT_ENABLED" \
+              "TeardownScopeTagValue=$TEARDOWN_SCOPE_TAG_VALUE"
+
+      - name: Update Lambda code
+        env:
+          BUCKET: ${{ vars.ARTIFACTS_BUCKET }}
+        run: |
+          for name in scanner enrichment teardown api mcp; do
+            fn="cost-janitor-$name-$ENVIRONMENT"
+            aws lambda update-function-code --function-name "$fn" \
+              --s3-bucket "$BUCKET" --s3-key "cost-janitor/$name-$GITHUB_SHA.zip" \
+              --query 'LastUpdateStatus' --output text
+            aws lambda wait function-updated-v2 --function-name "$fn"
+          done
+
+      - name: Publish API routes
+        run: |
+          api_id="$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --query "Stacks[0].Outputs[?OutputKey=='ApiId'].OutputValue" --output text)"
+          aws apigateway create-deployment --rest-api-id "$api_id" --stage-name "$ENVIRONMENT" \
+            --description "$GITHUB_SHA" --query id --output text
+
+      - name: Smoke test
+        run: |
+          out() { aws cloudformation describe-stacks --stack-name "$STACK_NAME" --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text; }
+          api="$(out ApiEndpoint)"; mcp="$(out McpEndpoint)"; site="$(out FrontendUrl)"
+          code="$(curl -s -o /tmp/findings.json -w '%{http_code}' "$api/findings")"
+          echo "GET /findings -> $code"; head -c 300 /tmp/findings.json; echo
+          [ "$code" = "200" ] || { echo "::error::GET /findings returned $code"; exit 1; }
+          cors="$(curl -s -D - -o /dev/null -X OPTIONS "$api/approvals/x/vote" -H "Origin: $site" -H 'Access-Control-Request-Method: POST' | tr -d '\r' | grep -i '^access-control-allow-origin:' || true)"
+          echo "Preflight: $cors"
+          [ -n "$cors" ] || { echo "::error::Preflight returned no CORS header"; exit 1; }
+          code="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$mcp" -H 'Content-Type: application/json' -d '{}')"
+          echo "POST /mcp without key -> $code"
+          [ "$code" = "403" ] || { echo "::error::/mcp should require an API key, got $code"; exit 1; }
+
+      - name: Summary
+        run: |
+          aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+            --query "Stacks[0].Outputs[?contains('FrontendUrl ApiEndpoint McpEndpoint McpApiKeyId', OutputKey)].[OutputKey,OutputValue]" \
+            --output text | awk 'BEGIN{print "| Output | Value |\n|---|---|"} {print "| " $1 " | " $2 " |"}' >> "$GITHUB_STEP_SUMMARY"
+
+  frontend:
+    name: Deploy frontend
+    needs: backend
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Read stack outputs
+        id: stack
+        run: |
+          out() { aws cloudformation describe-stacks --stack-name "$STACK_NAME" --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text; }
+          echo "api=$(out ApiEndpoint)" >> "$GITHUB_OUTPUT"
+          echo "bucket=$(out FrontendBucketName)" >> "$GITHUB_OUTPUT"
+          echo "distribution=$(out CloudFrontDistributionId)" >> "$GITHUB_OUTPUT"
+          echo "url=$(out FrontendUrl)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build
+        working-directory: frontend
+        env:
+          REACT_APP_API_URL: ${{ steps.stack.outputs.api }}
+        run: |
+          npm ci
+          npm run build
+
+      # Hashed assets can be cached forever; index.html must not be, or browsers keep the old app.
+      - name: Upload
+        env:
+          BUCKET: ${{ steps.stack.outputs.bucket }}
+        run: |
+          aws s3 sync frontend/build/static "s3://$BUCKET/static" \
+            --cache-control "public, max-age=31536000, immutable" --only-show-errors
+          aws s3 sync frontend/build "s3://$BUCKET" --exclude "static/*" --delete \
+            --cache-control "no-cache" --only-show-errors
+
+      - name: Invalidate CloudFront
+        run: |
+          aws cloudfront create-invalidation --distribution-id "${{ steps.stack.outputs.distribution }}" \
+            --paths "/index.html" "/" "/manifest.json" "/asset-manifest.json" --query 'Invalidation.Id' --output text
+          echo "Dashboard: ${{ steps.stack.outputs.url }}" >> "$GITHUB_STEP_SUMMARY"
