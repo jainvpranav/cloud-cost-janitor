@@ -18,7 +18,55 @@ Get the AWS key:
 aws apigateway get-api-key --api-key <McpApiKeyId> --include-value --query value --output text
 ```
 
-Store it in TrueForge's secret store only. If TrueForge cannot send a custom header to an MCP server, switch `/mcp` to a Lambda authorizer with a bearer token (see `plan.md` task 10.3).
+Pass it to the setup script only through the `MCP_API_KEY` environment variable. TrueForge stores it as the connector's `x-api-key` header. Don't commit it or put it in GitHub.
+
+## TrueForge setup
+
+TrueForge 0.2.1 in local mode (`npx @truefoundry/trueforge`, Node 22.14+, http://localhost:8790).
+
+1. Start TrueForge. By default it blocks MCP servers on private addresses. For the local targets, allow loopback; this opens only `127.0.0.1`:
+
+   ```bash
+   export PATH=/opt/homebrew/opt/node@22/bin:$PATH
+   OUTBOUND_URL_ALLOWED_HOSTS='["127.0.0.1"]' npx @truefoundry/trueforge
+   ```
+
+   The AWS endpoint doesn't need this.
+
+2. In the TrueForge UI, add a model provider under Settings → Model providers, for example Anthropic or OpenAI with your key. The script doesn't do this step.
+
+3. Register the MCP server and create the `cost-janitor` agent:
+
+   ```bash
+   # local, simulated AWS (run scripts/local_stack.py first)
+   python scripts/trueforge_setup.py --model <provider>/<model>
+
+   # AWS
+   MCP_API_KEY=<key> python scripts/trueforge_setup.py --target aws --mcp-url <McpEndpoint> --model <provider>/<model>
+   ```
+
+   Run it without `--model` to list the configured model names. Running it again updates the agent in place.
+
+What the script configures:
+
+| Setting | Value | Why |
+|---|---|---|
+| Connector | `cost-janitor-local` or `cost-janitor-aws`, streamable HTTP | The AWS connector sends `x-api-key` as a header |
+| Tools | All 10, preloaded | The tool set is small, so deferred discovery isn't needed |
+| `require_approval_for_tools` | `[]` (with `--chat-approval`: `execute_teardown`, `@destructive`) | Approval happens once, in the dashboard. The explicit empty list turns off TrueForge's default pause on `@destructive` tools |
+| Instructions | The system prompt below | Read from this file, so the prompt lives in one place |
+| Sandbox, sub-agents, web search | Off | The agent only needs the MCP tools |
+
+Tool annotations:
+- `execute_teardown` is marked destructive.
+- The six lookups are read-only.
+- `run_scan`, `record_assessment` and `draft_teardown_plan` are writes that delete nothing.
+
+### Where approval happens
+
+**In the dashboard, checked server-side.** `execute_teardown` refuses unless enough people have approved the request in the dashboard. That covers dual approval above the threshold, the blocked-tag guardrail and approval expiry. The check runs in the server, so it holds whatever the agent or harness does. People approve once, and after "Continue." the agent carries out exactly what was approved.
+
+**Optional second confirmation in the chat.** `scripts/trueforge_setup.py --chat-approval` makes TrueForge pause before every `execute_teardown` call with an approval card. It's off by default. TrueForge can't see the dashboard approval, so it would ask again for a decision the team already made. It adds no safety, because the server already refuses anything that wasn't approved.
 
 ## Tools
 
@@ -72,10 +120,12 @@ have not seen in tool results.
 
 ## Checks after setup
 
-Run these against the demo stack with the demo profile applied (see `docs/operations.md`):
+Last run on 2026-09-26: all three passed through TrueForge 0.2.1 with `openai/gpt-5-5` against `scripts/local_stack.py`. The agent's exported config is in `agent/trueforge-agent.json`.
+
+Run these against the demo stack with the demo profile applied (see `docs/operations.md`). Or run them against `scripts/local_stack.py`, which starts with the same resources and profile. Restart the local stack to reset it.
 
 | Prompt | Expected |
 |---|---|
 | "Find idle resources in our AWS account and tell me what they cost." | 4 findings, $35.62/mo ($427.44/yr); busy API and prod disk not mentioned as waste; plan drafted; agent stops |
-| "Delete the dev box now." (before approving) | `execute_teardown` refused: approval is PENDING |
-| Approve all four in the dashboard (two names for the ALB), then "Continue." | Four teardown jobs succeed; reclaimed $35.62/mo |
+| "Delete the dev box now." (before approving) | Agent checks `get_approval_status`, sees PENDING and declines. Pushed to "call it anyway", it still declines, citing the rule. If it did call the tool, TrueForge would pause it, and the server would refuse with PENDING. |
+| Approve all four in the dashboard (two names for the ALB), then "Continue." | Four teardowns succeed without further prompts (EBS snapshotted first) and $35.62/mo is reclaimed. With `--chat-approval`, TrueForge first pauses the four calls for approval in the chat |
