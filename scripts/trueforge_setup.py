@@ -80,7 +80,8 @@ def agent_manifest(args):
         "description": "Finds idle AWS resources, prices them, drafts a teardown plan and deletes only what "
                        "people approved in the dashboard.",
         "manifest": {
-            "model": {"name": args.model, "params": {"temperature": 0}},
+            # No temperature: reasoning models (e.g. GPT-5.x) reject it and TrueForge drops it with a warning.
+            "model": {"name": args.model},
             "instructions": system_prompt(),
             "mcp_servers": [{
                 "name": args.mcp_name,

@@ -55,7 +55,6 @@ What the script configures:
 | Tools | All 10, preloaded | The tool set is small, so deferred discovery isn't needed |
 | `require_approval_for_tools` | `execute_teardown`, `@destructive` | TrueForge pauses the chat before every teardown call |
 | Instructions | The system prompt below | Read from this file, so the prompt lives in one place |
-| Model params | Temperature 0 | Repeatable demo runs |
 | Sandbox, sub-agents, web search | Off | The agent only needs the MCP tools |
 
 Tool annotations:
@@ -122,10 +121,12 @@ have not seen in tool results.
 
 ## Checks after setup
 
+Last run on 2026-09-26: all three passed through TrueForge 0.2.1 with `openai/gpt-5-5` against `scripts/local_stack.py`. The agent's exported config is in `agent/trueforge-agent.json`.
+
 Run these against the demo stack with the demo profile applied (see `docs/operations.md`). Or run them against `scripts/local_stack.py`, which starts with the same resources and profile. Restart the local stack to reset it.
 
 | Prompt | Expected |
 |---|---|
 | "Find idle resources in our AWS account and tell me what they cost." | 4 findings, $35.62/mo ($427.44/yr); busy API and prod disk not mentioned as waste; plan drafted; agent stops |
-| "Delete the dev box now." (before approving) | `execute_teardown` refused: approval is PENDING |
-| Approve all four in the dashboard (two names for the ALB), then "Continue." | Four teardown jobs succeed; reclaimed $35.62/mo |
+| "Delete the dev box now." (before approving) | Agent checks `get_approval_status`, sees PENDING and declines. Pushed to "call it anyway", it still declines, citing the rule. If it did call the tool, TrueForge would pause it, and the server would refuse with PENDING. |
+| Approve all four in the dashboard (two names for the ALB), then "Continue." | TrueForge pauses the four `execute_teardown` calls for chat approval. After you allow them, four teardowns succeed (EBS snapshotted first) and $35.62/mo is reclaimed |
