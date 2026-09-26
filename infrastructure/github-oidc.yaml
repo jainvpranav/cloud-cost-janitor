@@ -8,6 +8,13 @@ Parameters:
     Type: String
     Default: jainvpranav/cloud-cost-janitor
     Description: owner/name of the repository allowed to deploy
+  GitHubSubjectRepo:
+    Type: String
+    Default: ''
+    Description: >
+      The repository as it appears in the token's sub claim, when GitHub uses immutable ids
+      (owner@<owner-id>/name@<repo-id>). Copy it from the Deploy log step "Check role ARN and
+      OIDC claims". Leave empty if sub uses plain owner/name.
   DeployBranch:
     Type: String
     Default: master
@@ -24,6 +31,7 @@ Parameters:
 
 Conditions:
   CreateOidcProvider: !Equals [!Ref ExistingOidcProviderArn, '']
+  HasSubjectRepo: !Not [!Equals [!Ref GitHubSubjectRepo, '']]
 
 Resources:
   GitHubOidcProvider:
@@ -80,8 +88,12 @@ Resources:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
               StringLike:
                 token.actions.githubusercontent.com:sub:
-                  - !Sub repo:${GitHubRepo}:ref:refs/heads/${DeployBranch}
-                  - !Sub repo:${GitHubRepo}:environment:prod
+                  - !Sub
+                    - repo:${Repo}:ref:refs/heads/${DeployBranch}
+                    - Repo: !If [HasSubjectRepo, !Ref GitHubSubjectRepo, !Ref GitHubRepo]
+                  - !Sub
+                    - repo:${Repo}:environment:prod
+                    - Repo: !If [HasSubjectRepo, !Ref GitHubSubjectRepo, !Ref GitHubRepo]
       Policies:
         - PolicyName: CostJanitorDeploy
           PolicyDocument:

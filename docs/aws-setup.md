@@ -52,6 +52,8 @@ Takes about a minute. It should end with `Successfully created/updated stack`.
 
 If the repository is not `jainvpranav/cloud-cost-janitor` or the branch is not `master`, add `GitHubRepo=<owner/name>` and `DeployBranch=<branch>` to the parameters.
 
+If Deploy fails with `Not authorized to perform sts:AssumeRoleWithWebIdentity`, open the step **Check role ARN and OIDC claims** in the Deploy log. When GitHub identifies the repository by immutable ids, the step prints a notice like `GitHubSubjectRepo=owner@123/name@456`. Re-run the deploy command above with that value added to the parameters. Don't edit the role's trust policy by hand: the next stack update overwrites it.
+
 ## 4. Read the outputs
 
 ```bash

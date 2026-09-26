@@ -72,9 +72,13 @@ jobs:
           claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
           for key in ("sub", "aud", "repository", "environment", "ref"):
               print(f"{key}: {claims.get(key)}")
-          expected = f"repo:{claims.get('repository')}:environment:prod"
-          if claims.get("sub") != expected:
-              print(f"::warning::sub is not {expected}; the role trust policy in github-oidc.yaml will reject it.")
+          sub = claims.get("sub") or ""
+          if sub.endswith(":environment:prod") and sub.startswith("repo:"):
+              repo = sub[len("repo:"):-len(":environment:prod")]
+              if repo != claims.get("repository"):
+                  print(f"::notice::sub uses immutable ids. Deploy github-oidc.yaml with GitHubSubjectRepo={repo}")
+          else:
+              print(f"::warning::Unexpected sub format: {sub}. The role trust policy must allow it exactly.")
           PY
 
       - uses: aws-actions/configure-aws-credentials@v4
