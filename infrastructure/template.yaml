@@ -37,7 +37,7 @@ Resources:
   FindingsTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: !Sub cost-janitor-findings-${Environment}
+      TableName: !Sub ${AWS::StackName}-findings
       BillingMode: PAY_PER_REQUEST
       SSESpecification:
         SSEEnabled: true
@@ -71,7 +71,7 @@ Resources:
   ApprovalsTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: !Sub cost-janitor-approvals-${Environment}
+      TableName: !Sub ${AWS::StackName}-approvals
       BillingMode: PAY_PER_REQUEST
       SSESpecification:
         SSEEnabled: true
@@ -105,7 +105,7 @@ Resources:
   ConfigTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: !Sub cost-janitor-config-${Environment}
+      TableName: !Sub ${AWS::StackName}-config
       BillingMode: PAY_PER_REQUEST
       SSESpecification:
         SSEEnabled: true
@@ -119,7 +119,7 @@ Resources:
   PromptRegistryTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: !Sub cost-janitor-prompts-${Environment}
+      TableName: !Sub ${AWS::StackName}-prompts
       BillingMode: PAY_PER_REQUEST
       SSESpecification:
         SSEEnabled: true
@@ -138,7 +138,7 @@ Resources:
   JobsTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: !Sub cost-janitor-jobs-${Environment}
+      TableName: !Sub ${AWS::StackName}-jobs
       BillingMode: PAY_PER_REQUEST
       SSESpecification:
         SSEEnabled: true
@@ -156,7 +156,7 @@ Resources:
   ActivityTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: !Sub cost-janitor-activity-${Environment}
+      TableName: !Sub ${AWS::StackName}-activity
       BillingMode: PAY_PER_REQUEST
       SSESpecification:
         SSEEnabled: true
@@ -180,7 +180,7 @@ Resources:
   ApprovalNotificationTopic:
     Type: AWS::SNS::Topic
     Properties:
-      TopicName: !Sub cost-janitor-approvals-${Environment}
+      TopicName: !Sub ${AWS::StackName}-approvals
       DisplayName: Cost Janitor Approval Notifications
 
   ApprovalNotificationSubscription:
@@ -196,7 +196,7 @@ Resources:
   ScannerRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub cost-janitor-scanner-${Environment}
+      RoleName: !Sub ${AWS::StackName}-scanner
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -253,7 +253,7 @@ Resources:
   EnrichmentRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub cost-janitor-enrichment-${Environment}
+      RoleName: !Sub ${AWS::StackName}-enrichment
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -286,7 +286,7 @@ Resources:
   TeardownRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub cost-janitor-teardown-${Environment}
+      RoleName: !Sub ${AWS::StackName}-teardown
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -362,7 +362,7 @@ Resources:
   ApiRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub cost-janitor-api-${Environment}
+      RoleName: !Sub ${AWS::StackName}-api
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -402,7 +402,7 @@ Resources:
   McpRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub cost-janitor-mcp-${Environment}
+      RoleName: !Sub ${AWS::StackName}-mcp
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -445,31 +445,31 @@ Resources:
   ScannerLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
-      LogGroupName: !Sub /aws/lambda/cost-janitor-scanner-${Environment}
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}-scanner
       RetentionInDays: 7
 
   EnrichmentLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
-      LogGroupName: !Sub /aws/lambda/cost-janitor-enrichment-${Environment}
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}-enrichment
       RetentionInDays: 7
 
   TeardownLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
-      LogGroupName: !Sub /aws/lambda/cost-janitor-teardown-${Environment}
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}-teardown
       RetentionInDays: 7
 
   ApiLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
-      LogGroupName: !Sub /aws/lambda/cost-janitor-api-${Environment}
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}-api
       RetentionInDays: 7
 
   McpLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
-      LogGroupName: !Sub /aws/lambda/cost-janitor-mcp-${Environment}
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}-mcp
       RetentionInDays: 7
 
   # ============================================================
@@ -479,7 +479,7 @@ Resources:
     Type: AWS::Lambda::Function
     DependsOn: ScannerLogGroup
     Properties:
-      FunctionName: !Sub cost-janitor-scanner-${Environment}
+      FunctionName: !Sub ${AWS::StackName}-scanner
       Runtime: python3.11
       Handler: lambda_function.handler
       Role: !GetAtt ScannerRole.Arn
@@ -504,7 +504,7 @@ Resources:
     Type: AWS::Lambda::Function
     DependsOn: EnrichmentLogGroup
     Properties:
-      FunctionName: !Sub cost-janitor-enrichment-${Environment}
+      FunctionName: !Sub ${AWS::StackName}-enrichment
       Runtime: python3.11
       Handler: lambda_function.handler
       Role: !GetAtt EnrichmentRole.Arn
@@ -528,7 +528,7 @@ Resources:
     Type: AWS::Lambda::Function
     DependsOn: TeardownLogGroup
     Properties:
-      FunctionName: !Sub cost-janitor-teardown-${Environment}
+      FunctionName: !Sub ${AWS::StackName}-teardown
       Runtime: python3.11
       Handler: lambda_function.handler
       Role: !GetAtt TeardownRole.Arn
@@ -552,7 +552,7 @@ Resources:
     Type: AWS::Lambda::Function
     DependsOn: ApiLogGroup
     Properties:
-      FunctionName: !Sub cost-janitor-api-${Environment}
+      FunctionName: !Sub ${AWS::StackName}-api
       Runtime: python3.11
       Handler: api.handler
       Role: !GetAtt ApiRole.Arn
@@ -580,7 +580,7 @@ Resources:
     Type: AWS::Lambda::Function
     DependsOn: McpLogGroup
     Properties:
-      FunctionName: !Sub cost-janitor-mcp-${Environment}
+      FunctionName: !Sub ${AWS::StackName}-mcp
       Runtime: python3.11
       Handler: lambda_function.handler
       Role: !GetAtt McpRole.Arn
@@ -609,7 +609,7 @@ Resources:
   ApiGateway:
     Type: AWS::ApiGateway::RestApi
     Properties:
-      Name: !Sub cost-janitor-api-${Environment}
+      Name: !Sub ${AWS::StackName}-api
       Description: Cost Janitor API and MCP endpoint
       EndpointConfiguration:
         Types: [REGIONAL]
@@ -1003,14 +1003,14 @@ Resources:
   McpApiKey:
     Type: AWS::ApiGateway::ApiKey
     Properties:
-      Name: !Sub cost-janitor-mcp-${Environment}
+      Name: !Sub ${AWS::StackName}-mcp
       Description: Key for the TrueForge agent to call /mcp
       Enabled: true
 
   McpUsagePlan:
     Type: AWS::ApiGateway::UsagePlan
     Properties:
-      UsagePlanName: !Sub cost-janitor-mcp-${Environment}
+      UsagePlanName: !Sub ${AWS::StackName}-mcp
       ApiStages:
         - ApiId: !Ref ApiGateway
           Stage: !Ref ApiStage
@@ -1050,7 +1050,7 @@ Resources:
   DailyScanRule:
     Type: AWS::Events::Rule
     Properties:
-      Name: !Sub cost-janitor-daily-scan-${Environment}
+      Name: !Sub ${AWS::StackName}-daily-scan
       Description: Daily cost janitor scan at 6 AM UTC
       ScheduleExpression: "cron(0 6 * * ? *)"
       State: ENABLED

@@ -111,6 +111,19 @@ jobs:
             aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME"
           fi
 
+      # The stack creates the frontend bucket itself; a bucket made elsewhere fails early validation.
+      - name: Check frontend bucket
+        env:
+          BUCKET: ${{ vars.FRONTEND_BUCKET_NAME }}
+        run: |
+          owner="$(aws cloudformation describe-stack-resource --stack-name "$STACK_NAME" --logical-resource-id FrontendBucket --query 'StackResourceDetail.PhysicalResourceId' --output text 2>/dev/null || true)"
+          if [ "$owner" = "$BUCKET" ]; then echo "Bucket belongs to this stack"; exit 0; fi
+          if out="$(aws s3api head-bucket --bucket "$BUCKET" 2>&1)" || ! grep -qE '404|Not Found' <<<"$out"; then
+            echo "::error::FRONTEND_BUCKET_NAME '$BUCKET' already exists outside this stack. Set a new unique name starting with cost-janitor-."
+            exit 1
+          fi
+          echo "Bucket name is free"
+
       - name: Deploy stack
         env:
           NOTIFICATION_EMAIL: ${{ secrets.NOTIFICATION_EMAIL }}
