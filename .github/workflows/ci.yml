@@ -46,9 +46,13 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
+      # package-lock.json is written by npm 11 on developer machines; npm 10 (bundled with
+      # Node 20) resolves optional peer deps differently and rejects it as out of sync.
       - name: Install
         working-directory: frontend
-        run: npm ci
+        run: |
+          npm install -g npm@11
+          npm ci
 
       - name: Test
         working-directory: frontend

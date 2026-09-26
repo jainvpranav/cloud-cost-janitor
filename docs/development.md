@@ -174,6 +174,8 @@ cd frontend
 npm install
 ```
 
+Use **npm 11** (`npm -v`) whenever you change `package-lock.json`. CI installs npm 11 too; a lock written by npm 10 or older can fail `npm ci` there, and the reverse.
+
 #### 2. Configure the API URL (required)
 
 The frontend needs to know where the API lives. Without this, requests go to the

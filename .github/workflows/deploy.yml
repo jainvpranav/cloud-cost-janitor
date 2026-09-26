@@ -173,7 +173,9 @@ jobs:
         working-directory: frontend
         env:
           REACT_APP_API_URL: ${{ steps.stack.outputs.api }}
+        # npm 11 to match the lock file; see the Install step in ci.yml.
         run: |
+          npm install -g npm@11
           npm ci
           npm run build
 
