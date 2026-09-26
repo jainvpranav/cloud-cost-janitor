@@ -1,0 +1,6 @@
+-r mcp_server/requirements.txt
+boto3>=1.34.0
+pytest>=8
+moto[dynamodb,ec2,elbv2,cloudwatch,awslambda,sts]>=5.1
+cfn-lint>=1.20
+uvicorn>=0.31
