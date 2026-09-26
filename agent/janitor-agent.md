@@ -53,7 +53,7 @@ What the script configures:
 |---|---|---|
 | Connector | `cost-janitor-local` or `cost-janitor-aws`, streamable HTTP | The AWS connector sends `x-api-key` as a header |
 | Tools | All 10, preloaded | The tool set is small, so deferred discovery isn't needed |
-| `require_approval_for_tools` | `execute_teardown`, `@destructive` | TrueForge pauses the chat before every teardown call |
+| `require_approval_for_tools` | `[]` (with `--chat-approval`: `execute_teardown`, `@destructive`) | Approval happens once, in the dashboard. The explicit empty list turns off TrueForge's default pause on `@destructive` tools |
 | Instructions | The system prompt below | Read from this file, so the prompt lives in one place |
 | Sandbox, sub-agents, web search | Off | The agent only needs the MCP tools |
 
@@ -62,12 +62,11 @@ Tool annotations:
 - The six lookups are read-only.
 - `run_scan`, `record_assessment` and `draft_teardown_plan` are writes that delete nothing.
 
-### Two approval gates
+### Where approval happens
 
-1. **TrueForge, in the chat.** Before `execute_teardown` runs, the turn pauses with an approval card. If you deny it, the call never reaches the server.
-2. **Dashboard, server-side.** `execute_teardown` refuses unless enough people have approved the request in the dashboard. This is the gate that matters: it holds even if someone clicks through the chat approval or the agent is misconfigured.
+**In the dashboard, checked server-side.** `execute_teardown` refuses unless enough people have approved the request in the dashboard. That covers dual approval above the threshold, the blocked-tag guardrail and approval expiry. The check runs in the server, so it holds whatever the agent or harness does. People approve once, and after "Continue." the agent carries out exactly what was approved.
 
-For the demo, the chat approval shows the agent asking before it acts. The dashboard shows the team signing off on the spend.
+**Optional second confirmation in the chat.** `scripts/trueforge_setup.py --chat-approval` makes TrueForge pause before every `execute_teardown` call with an approval card. It's off by default. TrueForge can't see the dashboard approval, so it would ask again for a decision the team already made. It adds no safety, because the server already refuses anything that wasn't approved.
 
 ## Tools
 
@@ -129,4 +128,4 @@ Run these against the demo stack with the demo profile applied (see `docs/operat
 |---|---|
 | "Find idle resources in our AWS account and tell me what they cost." | 4 findings, $35.62/mo ($427.44/yr); busy API and prod disk not mentioned as waste; plan drafted; agent stops |
 | "Delete the dev box now." (before approving) | Agent checks `get_approval_status`, sees PENDING and declines. Pushed to "call it anyway", it still declines, citing the rule. If it did call the tool, TrueForge would pause it, and the server would refuse with PENDING. |
-| Approve all four in the dashboard (two names for the ALB), then "Continue." | TrueForge pauses the four `execute_teardown` calls for chat approval. After you allow them, four teardowns succeed (EBS snapshotted first) and $35.62/mo is reclaimed |
+| Approve all four in the dashboard (two names for the ALB), then "Continue." | Four teardowns succeed without further prompts (EBS snapshotted first) and $35.62/mo is reclaimed. With `--chat-approval`, TrueForge first pauses the four calls for approval in the chat |

@@ -15,10 +15,7 @@
         ],
         "disable_tools": [],
         "preload_tools": [],
-        "require_approval_for_tools": [
-          "execute_teardown",
-          "@destructive"
-        ],
+        "require_approval_for_tools": [],
         "preload": true
       }
     ],

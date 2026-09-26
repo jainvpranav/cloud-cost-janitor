@@ -87,9 +87,10 @@ def agent_manifest(args):
                 "name": args.mcp_name,
                 "enable_tools": ["@all"],
                 "preload": True,
-                # Second gate on top of the dashboard approval: TrueForge pauses the chat before any
-                # teardown call. The literal name keeps working even if annotations change.
-                "require_approval_for_tools": ["execute_teardown", "@destructive"],
+                # The dashboard approval, checked server-side by execute_teardown, is the gate. An explicit
+                # empty list is needed to switch off TrueForge's default pause on @destructive tools;
+                # --chat-approval adds that pause back as a second confirmation in the chat.
+                "require_approval_for_tools": ["execute_teardown", "@destructive"] if args.chat_approval else [],
             }],
             "config": {
                 "iteration_limit": 60,
@@ -109,6 +110,8 @@ def main():
     p.add_argument("--mcp-name", help="Connector name in TrueForge (default cost-janitor-<target>)")
     p.add_argument("--model", help="Model FQN provider/model, e.g. anthropic/claude-sonnet-5")
     p.add_argument("--mcp-only", action="store_true", help="Register the MCP server only, skip the agent")
+    p.add_argument("--chat-approval", action="store_true",
+                   help="Also pause in the TrueForge chat before execute_teardown (off by default)")
     args = p.parse_args()
     args.mcp_name = args.mcp_name or f"cost-janitor-{args.target}"
     args.mcp_url = args.mcp_url or (LOCAL_MCP_URL if args.target == "local" else None)
@@ -135,7 +138,8 @@ def main():
     else:
         agent_id = call(api, "POST", "/agents", body)["data"]["id"]
         print(f"Created agent {AGENT_NAME} ({agent_id})")
-    print(f"Model {args.model}; approval required for execute_teardown. Open {args.trueforge} and pick {AGENT_NAME}.")
+    gate = "dashboard + chat" if args.chat_approval else "dashboard only"
+    print(f"Model {args.model}; teardown approval: {gate}. Open {args.trueforge} and pick {AGENT_NAME}.")
 
 
 if __name__ == "__main__":
