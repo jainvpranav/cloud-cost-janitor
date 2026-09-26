@@ -25,7 +25,7 @@ Architecture reference: https://claude.ai/artifact/KWkzcJiXVidCLPbsF8c8K6
 | 7 | Dashboard: everything visible in the UI | claude | Done (browser-verified on local stack) |
 | 8 | GitHub Actions | claude | Done (not yet run on GitHub) |
 | 9 | Demo stack (on request only) | claude | Done (not yet deployed) |
-| 10 | TrueForge agent (local) | claude + you | Prompt ready; TrueForge setup open |
+| 10 | TrueForge agent (local) | claude + you | Done (all 3 checks pass through TrueForge on the local stack) |
 | 11 | First deploy and end-to-end check | you + claude | Open |
 | 12 | Rehearsal, demo, cleanup | you | Open |
 
@@ -315,12 +315,12 @@ Separate stack `janitor-demo`. Never created by a push.
 
 ## Phase 10: TrueForge agent (local) `[claude + you]`
 
-- [ ] **10.1** `[you]` Add the model provider in TrueForge (`http://localhost:8790`).
+- [x] ~~**10.1** `[you]` Add the model provider in TrueForge (`http://localhost:8790`).~~ _(OpenAI; agent uses `openai/gpt-5-5`)_
 - [x] ~~**10.2** `[claude]` `agent/janitor-agent.md`: system prompt, tool rules, stop-for-approval behavior, output format.~~ _(agent/janitor-agent.md)_
-- [ ] **10.3** `[claude + you]` Register the MCP server: local `http://localhost:8000/mcp`; cloud `McpEndpoint` with header `x-api-key`. If TrueForge can't send headers, switch `/mcp` to a Lambda authorizer with a bearer token.
-- [ ] **10.4** `[claude + you]` Create the "cost-janitor" agent. Turn on per-tool approval for `execute_teardown` if TrueForge supports it.
-- [ ] **10.5** Scripted checks: finds 4 items and $35.62; refuses to delete before approval; deletes after approval. _(all three verified by calling the MCP tools against scripts/local_stack.py; still to run through TrueForge itself)_
-- [ ] **10.6** Save the final prompt and any TrueForge export in `agent/`.
+- [x] ~~**10.3** `[claude + you]` Register the MCP server: local `http://localhost:8000/mcp`; cloud `McpEndpoint` with header `x-api-key`. If TrueForge can't send headers, switch `/mcp` to a Lambda authorizer with a bearer token.~~ _(`scripts/trueforge_setup.py`. TrueForge supports `auth: {type: header}`, so no authorizer is needed. Local runs need `OUTBOUND_URL_ALLOWED_HOSTS='["127.0.0.1"]'` because TrueForge blocks private addresses. `cost-janitor-local` is registered and lists all 10 tools.)_
+- [x] ~~**10.4** `[claude + you]` Create the "cost-janitor" agent. Turn on per-tool approval for `execute_teardown` if TrueForge supports it.~~ _(`scripts/trueforge_setup.py --model openai/gpt-5-5`. Chat approval is opt-in (`--chat-approval`). The default is `require_approval_for_tools: []`, because approval happens in the dashboard. The MCP tools carry read-only and destructive annotations. TrueForge rejects unknown models, so the provider must exist first.)_
+- [x] ~~**10.5** Scripted checks: finds 4 items and $35.62; refuses to delete before approval; deletes after approval.~~ _(All three passed through TrueForge on 2026-09-26. Before approval the agent declined on its own, even when told to call the tool anyway. After dual approval in the dashboard, $35.62/mo was reclaimed. The first run also had TrueForge's chat approval on and paused the 4 calls. That's now off by default because it asked again for a decision already made in the dashboard (`--chat-approval` turns it back on). Re-verified with it off.)_
+- [x] ~~**10.6** Save the final prompt and any TrueForge export in `agent/`.~~ _(prompt in `agent/janitor-agent.md`, export in `agent/trueforge-agent.json`)_
 
 ---
 
