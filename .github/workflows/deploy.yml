@@ -51,6 +51,32 @@ jobs:
             exit 1;;
           esac
 
+      # AWS only says "Not authorized" when the trust policy rejects the token. Print the claims
+      # it is matched against (never the token itself) so a mismatch is visible in the log.
+      - name: Check role ARN and OIDC claims
+        env:
+          ROLE: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+        run: |
+          if [[ ! "$ROLE" =~ ^arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]+$ ]]; then
+            echo "::error::AWS_DEPLOY_ROLE_ARN is not an IAM role ARN. Expected arn:aws:iam::<account-id>:role/cost-janitor-github-deploy with no spaces, quotes or newlines."
+            exit 1
+          fi
+          echo "Role name: ${ROLE##*/}"
+          python3 - <<'PY'
+          import base64, json, os, urllib.request
+          req = urllib.request.Request(
+              os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"] + "&audience=sts.amazonaws.com",
+              headers={"Authorization": "bearer " + os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]},
+          )
+          payload = json.load(urllib.request.urlopen(req))["value"].split(".")[1]
+          claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+          for key in ("sub", "aud", "repository", "environment", "ref"):
+              print(f"{key}: {claims.get(key)}")
+          expected = f"repo:{claims.get('repository')}:environment:prod"
+          if claims.get("sub") != expected:
+              print(f"::warning::sub is not {expected}; the role trust policy in github-oidc.yaml will reject it.")
+          PY
+
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
