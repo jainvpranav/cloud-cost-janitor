@@ -67,7 +67,7 @@ Only then can the agent's teardown call go through. See [plan.md](plan.md) for t
 
 3. Push to `master`. `deploy.yml` tests, deploys the stack, updates every Lambda and publishes the dashboard.
 
-Full steps: [docs/deployment.md](docs/deployment.md). Demo resources are created only on request:
+AWS steps in order: [docs/aws-setup.md](docs/aws-setup.md). Full reference: [docs/deployment.md](docs/deployment.md). Demo resources are created only on request:
 Actions → **Demo resources** → `create` ([docs/operations.md](docs/operations.md#demo-runbook)).
 
 ### Run locally without AWS
